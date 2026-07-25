@@ -550,6 +550,28 @@ function buildTransform(segments: VoicePlaybackTextSegment[]): VoicePlaybackTran
   return { text, segments: keptSegments, map };
 }
 
+export function playbackOffsetForSourceIndex(
+  transform: VoicePlaybackTransform,
+  sourceIndex: number,
+): number | null {
+  if (transform.map.length === 0 || !transform.text) return null;
+  const clampedSourceIndex = Math.max(0, sourceIndex);
+
+  for (const entry of transform.map) {
+    if (clampedSourceIndex >= entry.sourceStart && clampedSourceIndex <= entry.sourceEnd) {
+      return Math.max(
+        entry.outputStart,
+        Math.min(entry.outputEnd, entry.outputStart + clampedSourceIndex - entry.sourceStart),
+      );
+    }
+    if (clampedSourceIndex < entry.sourceStart) {
+      return entry.outputStart;
+    }
+  }
+
+  return transform.map[transform.map.length - 1].outputStart;
+}
+
 export function sourceRangeForPlaybackRange(
   transform: VoicePlaybackTransform,
   playbackStart: number,

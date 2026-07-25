@@ -452,6 +452,8 @@ export async function kokoroPreview(
   });
 }
 
+const audioObjectUrls = new WeakMap<HTMLAudioElement, string>();
+
 export function playAudioFromBase64(audioBase64: string, format: string): HTMLAudioElement {
   const byteString = atob(audioBase64);
   const bytes = new Uint8Array(byteString.length);
@@ -461,7 +463,16 @@ export function playAudioFromBase64(audioBase64: string, format: string): HTMLAu
 
   const url = URL.createObjectURL(new Blob([bytes], { type: format }));
   const audio = new Audio(url);
-  const cleanup = () => URL.revokeObjectURL(url);
+  audioObjectUrls.set(audio, url);
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    audioObjectUrls.delete(audio);
+    URL.revokeObjectURL(url);
+  };
+
   audio.addEventListener("ended", cleanup, { once: true });
   audio.addEventListener("error", cleanup, { once: true });
   void audio.play().catch((err) => {
@@ -469,6 +480,27 @@ export function playAudioFromBase64(audioBase64: string, format: string): HTMLAu
     console.error("Audio playback failed:", err);
   });
   return audio;
+}
+
+export function stopAudioElement(audio: HTMLAudioElement | null | undefined): void {
+  if (!audio) return;
+
+  try {
+    audio.pause();
+    audio.currentTime = 0;
+    audio.onended = null;
+    audio.onerror = null;
+
+    const url = audioObjectUrls.get(audio);
+    audioObjectUrls.delete(audio);
+    audio.removeAttribute("src");
+    audio.load();
+    if (url) {
+      URL.revokeObjectURL(url);
+    }
+  } catch (error) {
+    console.warn("Failed to stop audio playback:", error);
+  }
 }
 
 export async function abortAudioPreview(requestId: string): Promise<void> {

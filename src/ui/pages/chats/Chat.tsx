@@ -45,6 +45,7 @@ import {
   listUserVoices,
   playAudioFromBase64,
   splitTextForTtsQueue,
+  stopAudioElement,
   type AudioModel,
   type AudioProvider,
   type AudioProviderType,
@@ -74,6 +75,7 @@ import { splitThinkTags } from "../../../core/utils/thinkTags";
 import { getPlatform } from "../../../core/utils/platform";
 import {
   applyVoicePlaybackRules,
+  playbackOffsetForSourceIndex,
   sourceRangeForPlaybackRange,
   type VoicePlaybackTransform,
 } from "../../../core/tts/voicePlaybackRules";
@@ -1276,9 +1278,14 @@ export function ChatConversationPage() {
       prompt?: string;
       baseCacheKey: string;
       highlightTransform?: VoicePlaybackTransform;
+      startOffset?: number | null;
     }) => {
       const chunks = splitTextForTtsQueue(params.text);
       if (chunks.length === 0) return;
+      const startOffset = Math.max(0, params.startOffset ?? 0);
+      const matchingStartChunkIndex = chunks.findIndex((chunk) => chunk.end > startOffset);
+      const startChunkIndex =
+        matchingStartChunkIndex >= 0 ? matchingStartChunkIndex : chunks.length - 1;
 
       const queueId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
       const queue: QueuedAudioPlayback = {
@@ -1370,8 +1377,8 @@ export function ChatConversationPage() {
         });
 
       try {
-        let nextResponsePromise: Promise<TtsPreviewResponse> | null = queueChunkResponse(0);
-        for (let index = 0; index < chunks.length; index += 1) {
+        let nextResponsePromise: Promise<TtsPreviewResponse> | null = queueChunkResponse(startChunkIndex);
+        for (let index = startChunkIndex; index < chunks.length; index += 1) {
           ensureActive();
           if (!nextResponsePromise) break;
           const response = await nextResponsePromise;
@@ -1426,6 +1433,12 @@ export function ChatConversationPage() {
   );
 
   const stopAudioPlayback = useCallback(() => {
+    const audio = audioPlaybackRef.current;
+    const messageId = audioPlayingMessageIdRef.current;
+    stopAudioElement(audio);
+    audioPlaybackRef.current = null;
+    audioPlayingMessageIdRef.current = null;
+
     const queue = audioQueueRef.current;
     if (queue) {
       queue.cancelled = true;
@@ -1441,17 +1454,7 @@ export function ChatConversationPage() {
       audioQueueRef.current = null;
     }
 
-    const audio = audioPlaybackRef.current;
-    if (audio) {
-      audio.pause();
-      audio.currentTime = 0;
-      audio.onended = null;
-      audio.onerror = null;
-    }
-    audioPlaybackRef.current = null;
-    const messageId = audioPlayingMessageIdRef.current;
     if (messageId) {
-      audioPlayingMessageIdRef.current = null;
       setAudioHighlight(messageId, null);
       setAudioStatus(messageId, null);
     }
@@ -1464,16 +1467,10 @@ export function ChatConversationPage() {
 
     if (queue) {
       queue.cancelled = true;
-      queue.resolveCurrentChunk?.();
-      const audio = audioPlaybackRef.current;
-      if (audio) {
-        audio.pause();
-        audio.currentTime = 0;
-        audio.onended = null;
-        audio.onerror = null;
-      }
+      stopAudioElement(audioPlaybackRef.current);
       audioPlaybackRef.current = null;
       audioPlayingMessageIdRef.current = null;
+      queue.resolveCurrentChunk?.();
       setAudioHighlight(queue.messageId, null);
       setAudioStatus(queue.messageId, null);
       audioQueueRef.current = null;
@@ -1529,7 +1526,7 @@ export function ChatConversationPage() {
   }, [cancelAudioGeneration, stopAudioPlayback]);
 
   const handlePlayMessageAudio = useCallback(
-    async (message: StoredMessage, text: string) => {
+    async (message: StoredMessage, text: string, options?: { startIndex?: number }) => {
       if (message.id.startsWith("placeholder")) return;
       if (message.role !== "assistant" && message.role !== "scene") return;
       if (!character?.voiceConfig) return;
@@ -1537,13 +1534,14 @@ export function ChatConversationPage() {
       const trimmedText = text.trim();
       if (!trimmedText) return;
 
+      const shouldJumpPlayback = typeof options?.startIndex === "number";
       if (audioRequestRef.current?.messageId === message.id) {
         await cancelAudioGeneration();
-        return;
+        if (!shouldJumpPlayback) return;
       }
-      if (audioPlayingMessageIdRef.current === message.id) {
+      if (audioPlayingMessageIdRef.current === message.id || audioQueueRef.current?.messageId === message.id) {
         stopAudioPlayback();
-        return;
+        if (!shouldJumpPlayback) return;
       }
 
       if (audioRequestRef.current) {
@@ -1566,6 +1564,14 @@ export function ChatConversationPage() {
         console.warn("Failed to apply voice playback rules:", error);
       }
       if (!playbackText) return;
+      const playbackStartOffset =
+        typeof options?.startIndex === "number" && playbackTransform
+          ? playbackOffsetForSourceIndex(playbackTransform, options.startIndex)
+          : null;
+      const effectivePlaybackText = playbackStartOffset
+        ? playbackText.slice(playbackStartOffset).trimStart()
+        : playbackText;
+      if (!effectivePlaybackText) return;
 
       const requestId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
       audioRequestRef.current = { requestId, messageId: message.id };
@@ -1607,7 +1613,7 @@ export function ChatConversationPage() {
           providerId: voice.providerId,
           modelId: voice.modelId,
           voiceId: voice.voiceId,
-          text: playbackText,
+          text: provider.providerType === "openai_tts" ? playbackText : effectivePlaybackText,
           prompt: voice.prompt,
         });
 
@@ -1622,6 +1628,7 @@ export function ChatConversationPage() {
               prompt: voice.prompt,
               baseCacheKey: cacheKey,
               highlightTransform: playbackTransform,
+              startOffset: playbackStartOffset,
             });
           } catch (error) {
             if (audioRequestRef.current?.requestId === requestId) {
@@ -1660,7 +1667,7 @@ export function ChatConversationPage() {
             voice.providerId,
             voice.modelId,
             voice.voiceId,
-            playbackText,
+            effectivePlaybackText,
             voice.prompt,
             requestId,
           );
@@ -1719,7 +1726,7 @@ export function ChatConversationPage() {
           providerId,
           modelId,
           voiceId,
-          text: playbackText,
+          text: provider.providerType === "openai_tts" ? playbackText : effectivePlaybackText,
         });
 
         if (provider.providerType === "openai_tts") {
@@ -1732,6 +1739,7 @@ export function ChatConversationPage() {
               text: playbackText,
               baseCacheKey: cacheKey,
               highlightTransform: playbackTransform,
+              startOffset: playbackStartOffset,
             });
           } catch (error) {
             if (audioRequestRef.current?.requestId === requestId) {
@@ -1770,7 +1778,7 @@ export function ChatConversationPage() {
             providerId,
             modelId,
             voiceId,
-            playbackText,
+            effectivePlaybackText,
             undefined,
             requestId,
           );
