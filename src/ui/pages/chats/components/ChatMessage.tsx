@@ -55,7 +55,12 @@ interface ChatMessageProps {
   displayContent?: string;
   onImageClick?: (src: string, alt: string) => void;
   audioStatus?: "loading" | "playing";
-  onPlayAudio?: (message: StoredMessage, text: string) => Promise<void>;
+  audioHighlight?: { start: number; end: number } | null;
+  onPlayAudio?: (
+    message: StoredMessage,
+    text: string,
+    options?: { startIndex?: number },
+  ) => Promise<void>;
   onStopAudio?: (message: StoredMessage) => void;
   onCancelAudio?: (message: StoredMessage) => void;
   reasoning?: string;
@@ -100,6 +105,116 @@ const MESSAGE_INFO_SIZE_MAP = {
 const AVATAR_SHAPE_MAP = { circle: "rounded-full", rounded: "rounded-lg", hidden: "" } as const;
 const AVATAR_SIZE_MAP = { small: "h-6 w-6", medium: "h-8 w-8", large: "h-10 w-10" } as const;
 const AVATAR_ICON_SIZE_MAP = { small: 12, medium: 16, large: 20 } as const;
+
+function textOffsetForNode(root: HTMLElement, targetNode: Node, targetOffset: number): number | null {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+  let node = walker.nextNode();
+
+  while (node) {
+    if (node === targetNode) {
+      return offset + Math.max(0, Math.min(targetNode.textContent?.length ?? 0, targetOffset));
+    }
+    offset += node.textContent?.length ?? 0;
+    node = walker.nextNode();
+  }
+
+  return null;
+}
+
+function visibleTextOffsetFromPoint(root: HTMLElement, clientX: number, clientY: number): number | null {
+  type CaretDoc = Document & {
+    caretPositionFromPoint?: (
+      x: number,
+      y: number,
+    ) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+
+  const doc = document as CaretDoc;
+  const position = doc.caretPositionFromPoint?.(clientX, clientY);
+  if (position?.offsetNode && root.contains(position.offsetNode)) {
+    const offset = textOffsetForNode(root, position.offsetNode, position.offset);
+    if (offset !== null) return offset;
+  }
+
+  const range = doc.caretRangeFromPoint?.(clientX, clientY);
+  if (range?.startContainer && root.contains(range.startContainer)) {
+    const offset = textOffsetForNode(root, range.startContainer, range.startOffset);
+    if (offset !== null) return offset;
+  }
+
+  const selection = window.getSelection();
+  if (selection?.anchorNode && root.contains(selection.anchorNode)) {
+    return textOffsetForNode(root, selection.anchorNode, selection.anchorOffset);
+  }
+
+  return null;
+}
+
+function isMarkdownSyntaxChar(ch: string): boolean {
+  return "*_`[]()!#>~-+|".includes(ch);
+}
+
+function sourceIndexFromVisibleOffset(source: string, visible: string, visibleOffset: number): number {
+  const targetVisibleOffset = Math.max(0, Math.min(visible.length, visibleOffset));
+  let sourceIndex = 0;
+  let visibleIndex = 0;
+  let atLineStart = true;
+
+  const skipUntilLineEnd = () => {
+    const nextLine = source.indexOf("\n", sourceIndex);
+    sourceIndex = nextLine >= 0 ? nextLine + 1 : source.length;
+    atLineStart = true;
+  };
+
+  while (sourceIndex < source.length && visibleIndex < targetVisibleOffset) {
+    const sourceChar = source[sourceIndex];
+    const visibleChar = visible[visibleIndex];
+
+    if (atLineStart && source.startsWith("```", sourceIndex)) {
+      skipUntilLineEnd();
+      continue;
+    }
+
+    if (source[sourceIndex] === "]" && source[sourceIndex + 1] === "(") {
+      const close = source.indexOf(")", sourceIndex + 2);
+      sourceIndex = close >= 0 ? close + 1 : sourceIndex + 2;
+      atLineStart = false;
+      continue;
+    }
+
+    if (sourceChar === visibleChar || (/\s/.test(sourceChar) && /\s/.test(visibleChar))) {
+      sourceIndex += 1;
+      visibleIndex += 1;
+      atLineStart = sourceChar === "\n";
+      continue;
+    }
+
+    if (isMarkdownSyntaxChar(sourceChar)) {
+      sourceIndex += 1;
+      atLineStart = false;
+      continue;
+    }
+
+    const nearby = source.indexOf(visibleChar, sourceIndex + 1);
+    if (nearby >= 0 && nearby - sourceIndex <= 80) {
+      sourceIndex = nearby + 1;
+      visibleIndex += 1;
+      atLineStart = visibleChar === "\n";
+      continue;
+    }
+
+    sourceIndex += 1;
+    atLineStart = sourceChar === "\n";
+  }
+
+  return Math.max(0, Math.min(source.length, sourceIndex));
+}
+
+function isInteractiveDoubleClickTarget(target: EventTarget | null): boolean {
+  return target instanceof Element && !!target.closest("button,a,input,textarea,select,img");
+}
 
 function formatMessageTimestamp(
   ms: number,
@@ -606,6 +721,7 @@ function ChatMessageInner({
   displayContent,
   onImageClick,
   audioStatus,
+  audioHighlight,
   onPlayAudio,
   onStopAudio,
   onCancelAudio,
@@ -617,6 +733,8 @@ function ChatMessageInner({
 }: ChatMessageProps) {
   const { t } = useI18n();
   const prevRoleRef = useRef(message.role);
+  const contentRootRef = useRef<HTMLDivElement>(null);
+  const lastAudioJumpTapRef = useRef<{ time: number; x: number; y: number } | null>(null);
   const [crossShift, setCrossShift] = useState(0);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
 
@@ -895,6 +1013,61 @@ function ChatMessageInner({
     ],
   );
 
+
+  const jumpAudioToPoint = useCallback(
+    async (clientX: number, clientY: number, eventTarget: EventTarget | null) => {
+      if (!canPlayAudio || !onPlayAudio) return;
+      if (isInteractiveDoubleClickTarget(eventTarget)) return;
+      const root = contentRootRef.current;
+      if (!root) return;
+
+      const visibleOffset = visibleTextOffsetFromPoint(root, clientX, clientY);
+      if (visibleOffset === null) return;
+      const visibleText = root.textContent ?? "";
+      const sourceIndex = sourceIndexFromVisibleOffset(
+        resolvedDisplayContent,
+        visibleText,
+        visibleOffset,
+      );
+
+      try {
+        await onPlayAudio(message, resolvedDisplayContent, { startIndex: sourceIndex });
+      } catch (error) {
+        console.error("Failed to jump message audio:", error);
+      }
+    },
+    [canPlayAudio, message, onPlayAudio, resolvedDisplayContent],
+  );
+
+  const handleContentDoubleClick = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      event.preventDefault();
+      event.stopPropagation();
+      void jumpAudioToPoint(event.clientX, event.clientY, event.target);
+    },
+    [jumpAudioToPoint],
+  );
+
+  const handleContentPointerUp = useCallback(
+    (event: React.PointerEvent<HTMLDivElement>) => {
+      if (event.pointerType === "mouse") return;
+      const now = Date.now();
+      const previous = lastAudioJumpTapRef.current;
+      lastAudioJumpTapRef.current = { time: now, x: event.clientX, y: event.clientY };
+      if (!previous) return;
+
+      const elapsed = now - previous.time;
+      const distance = Math.hypot(event.clientX - previous.x, event.clientY - previous.y);
+      if (elapsed > 350 || distance > 24) return;
+
+      event.preventDefault();
+      event.stopPropagation();
+      lastAudioJumpTapRef.current = null;
+      void jumpAudioToPoint(event.clientX, event.clientY, event.target);
+    },
+    [jumpAudioToPoint],
+  );
+
   const dragProps = useMemo(
     () =>
       computed.enableSwipe
@@ -1074,27 +1247,34 @@ function ChatMessageInner({
           <TypingIndicator />
         ) : computed.showTypingIndicator ? null : (
           <>
-            <SceneContent
-              key={message.id + ":" + computed.selectedVariantIndex}
-              content={resolvedDisplayContent}
-              className="text-inherit select-none"
-              onImageClick={onImageClick}
-              textColors={
-                chatAppearance?.messageTextColorHex ||
-                chatAppearance?.plainTextColorHex ||
-                chatAppearance?.italicTextColorHex ||
-                chatAppearance?.quotedTextColorHex ||
-                chatAppearance?.inlineCodeTextColorHex
-                  ? {
-                      texts: chatAppearance.messageTextColorHex ?? chatAppearance.plainTextColorHex,
-                      plain: chatAppearance.plainTextColorHex,
-                      italic: chatAppearance.italicTextColorHex,
-                      quoted: chatAppearance.quotedTextColorHex,
-                      code: chatAppearance.inlineCodeTextColorHex,
-                    }
-                  : undefined
-              }
-            />
+            <div
+              ref={contentRootRef}
+              onDoubleClick={handleContentDoubleClick}
+              onPointerUp={handleContentPointerUp}
+            >
+              <SceneContent
+                key={message.id + ":" + computed.selectedVariantIndex}
+                content={resolvedDisplayContent}
+                className="text-inherit select-none"
+                onImageClick={onImageClick}
+                highlightRange={audioHighlight}
+                textColors={
+                  chatAppearance?.messageTextColorHex ||
+                  chatAppearance?.plainTextColorHex ||
+                  chatAppearance?.italicTextColorHex ||
+                  chatAppearance?.quotedTextColorHex ||
+                  chatAppearance?.inlineCodeTextColorHex
+                    ? {
+                        texts: chatAppearance.messageTextColorHex ?? chatAppearance.plainTextColorHex,
+                        plain: chatAppearance.plainTextColorHex,
+                        italic: chatAppearance.italicTextColorHex,
+                        quoted: chatAppearance.quotedTextColorHex,
+                        code: chatAppearance.inlineCodeTextColorHex,
+                      }
+                    : undefined
+                }
+              />
+            </div>
 
             {/* Display attachments below the message content */}
             {loadedAttachments.length > 0 && (
@@ -1349,6 +1529,8 @@ export const ChatMessage = React.memo(ChatMessageInner, (prev, next) => {
     prev.scenePromptStreaming === next.scenePromptStreaming &&
     prev.swapPlaces === next.swapPlaces &&
     prev.audioStatus === next.audioStatus &&
+    prev.audioHighlight?.start === next.audioHighlight?.start &&
+    prev.audioHighlight?.end === next.audioHighlight?.end &&
     a.reasoning === b.reasoning &&
     prev.reasoning === next.reasoning &&
     prev.onPlayAudio === next.onPlayAudio &&
