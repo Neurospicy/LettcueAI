@@ -42,7 +42,9 @@ import { readSettings, saveAdvancedSettings } from "../../../core/storage/repo";
 import type { VoicePlaybackRule } from "../../../core/storage/schemas";
 import {
   compileVoicePlaybackRegex,
+  findVoicePlaybackRuleExample,
   normalizeVoicePlaybackRules,
+  type VoicePlaybackRuleExampleMatch,
 } from "../../../core/tts/voicePlaybackRules";
 
 const GEMINI_VOICES = [
@@ -520,12 +522,9 @@ export function VoicesPage() {
         <div className="space-y-3 rounded-xl border border-fg/10 bg-fg/5 p-4">
           <div className="rounded-lg border border-fg/10 bg-surface-el/20 p-3 text-xs text-fg/55">
             <p>
-              If any enabled <span className="font-medium text-accent">include</span> rule exists,
-              only matching text is sent to TTS. Enabled <span className="font-medium text-danger">exclude</span> rules
-              then remove matching text from playback.
-            </p>
-            <p className="mt-1 text-fg/40">
-              Examples: exclude <code className="rounded bg-black/30 px-1">\[[^\]\n]*\]</code>, exclude stage directions like <code className="rounded bg-black/30 px-1">\*[^*\n]+\*</code>, or include only quoted dialogue. Use normal regex escaping with backslashes.
+              <span className="font-semibold text-accent">Include rules</span> restrict TTS to matching text only.
+              <br />
+              <span className="font-semibold text-danger">Exclude rules</span> remove matching text from playback.
             </p>
           </div>
 
@@ -568,6 +567,7 @@ export function VoicesPage() {
                   <p className="mt-0.5 text-[11px] text-fg/40">
                     {rule.enabled ? "Active during playback" : "Disabled and ignored"}
                   </p>
+                  <PlaybackRuleExample rule={rule} />
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
                   <button
@@ -829,6 +829,51 @@ function formatBytes(bytes: number, sizes: string[]): string {
   const k = 1024;
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(1))} ${sizes[i]}`;
+}
+
+function PlaybackRuleExample({ rule }: { rule: VoicePlaybackRule }) {
+  let example: VoicePlaybackRuleExampleMatch | null = null;
+  let error: string | null = null;
+
+  try {
+    example = findVoicePlaybackRuleExample(rule);
+  } catch (err) {
+    error = err instanceof Error ? err.message : String(err);
+  }
+
+  return (
+    <div className="mt-2 rounded-lg border border-fg/10 bg-black/20 p-2">
+      <div className="mb-1 flex items-center justify-between gap-2">
+        <span className="text-[10px] font-medium uppercase tracking-wide text-fg/35">
+          Example match
+        </span>
+        {example && (
+          <span className="truncate text-[10px] text-fg/30">{example.datasetId}</span>
+        )}
+      </div>
+      {error ? (
+        <p className="text-[11px] text-danger/80">Invalid regex: {error}</p>
+      ) : example ? (
+        <HighlightedPlaybackRuleExample example={example} />
+      ) : (
+        <p className="text-[11px] text-fg/35">
+          No match found in the sample dataset for this expression yet.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function HighlightedPlaybackRuleExample({ example }: { example: VoicePlaybackRuleExampleMatch }) {
+  return (
+    <pre className="whitespace-pre-wrap break-words rounded-md bg-surface-el/25 px-2 py-1.5 font-mono text-[11px] leading-relaxed text-fg/65">
+      {example.text.slice(0, example.matchStart)}
+      <mark className="rounded bg-accent/30 px-0.5 py-0.5 text-fg shadow-[0_0_0_1px_rgba(255,255,255,0.08)]">
+        {example.text.slice(example.matchStart, example.matchEnd)}
+      </mark>
+      {example.text.slice(example.matchEnd)}
+    </pre>
+  );
 }
 
 interface VoiceEditorProps {

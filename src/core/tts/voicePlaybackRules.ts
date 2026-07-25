@@ -19,7 +19,125 @@ export type VoicePlaybackTransform = {
   map: VoicePlaybackOutputMap[];
 };
 
+export type VoicePlaybackRuleExampleText = {
+  id: string;
+  text: string;
+  builtinIds?: Array<NonNullable<VoicePlaybackRule["builtinId"]>>;
+};
+
+export type VoicePlaybackRuleExampleMatch = {
+  datasetId: string;
+  text: string;
+  matchStart: number;
+  matchEnd: number;
+};
+
 type BuiltinRuleDefinition = Omit<VoicePlaybackRule, "enabled"> & { enabled: boolean };
+
+export const VOICE_PLAYBACK_RULE_EXAMPLE_TEXTS: VoicePlaybackRuleExampleText[] = [
+  {
+    id: "bracketed-note",
+    builtinIds: ["excludeBracketedNotes"],
+    text: "Mira lowers her voice. [system note: keep this private] We should leave before sunrise.",
+  },
+  {
+    id: "stage-direction",
+    builtinIds: ["excludeStageDirections"],
+    text: '"I missed you," she says. *smiles softly* "More than I wanted to admit."',
+  },
+  {
+    id: "parenthetical-aside",
+    builtinIds: ["excludeParentheticals"],
+    text: "He reaches for the lantern (the old brass one) and checks the hallway.",
+  },
+  {
+    id: "markdown-image",
+    builtinIds: ["excludeMarkdownImages"],
+    text: "Here is the route we found: ![map of the ruins](https://example.com/ruins-map.png)",
+  },
+  {
+    id: "markdown-link",
+    builtinIds: ["excludeMarkdownLinks"],
+    text: "Read [the mission brief](https://example.com/briefing) before you answer.",
+  },
+  {
+    id: "reference-link",
+    builtinIds: ["excludeReferenceLinks"],
+    text: "The archive calls it [Project Halcyon][halcyon-ref], but nobody says why.",
+  },
+  {
+    id: "link-definition",
+    builtinIds: ["excludeLinkDefinitions"],
+    text: "[halcyon-ref]: https://example.com/archive/halcyon\nThe next line is normal narration.",
+  },
+  {
+    id: "autolink",
+    builtinIds: ["excludeAutolinks"],
+    text: "Status mirror: <https://status.example.com> or https://example.com/plain-url",
+  },
+  {
+    id: "inline-code",
+    builtinIds: ["excludeInlineCode"],
+    text: "Run `cargo test --all` before you ship the build.",
+  },
+  {
+    id: "fenced-code",
+    builtinIds: ["excludeFencedCodeBlocks"],
+    text: '```ts\nconst line = "do not speak this code";\nconsole.log(line);\n```\nThen she closes the laptop.',
+  },
+  {
+    id: "heading",
+    builtinIds: ["excludeHeadings"],
+    text: "## Chapter Three\nThe rain finally stops.",
+  },
+  {
+    id: "blockquote",
+    builtinIds: ["excludeBlockquotes"],
+    text: "> This old letter should not be read aloud.\nShe folds the page in half.",
+  },
+  {
+    id: "task-list",
+    builtinIds: ["excludeTaskListItems"],
+    text: "- [ ] Calibrate the transmitter\n- [x] Lock the archive door",
+  },
+  {
+    id: "unordered-list",
+    builtinIds: ["excludeUnorderedListItems"],
+    text: "- bread\n- lantern oil\n- spare batteries",
+  },
+  {
+    id: "ordered-list",
+    builtinIds: ["excludeOrderedListItems"],
+    text: "1. Wake the lookout\n2. Hide the map\n3. Leave quietly",
+  },
+  {
+    id: "definition-list",
+    builtinIds: ["excludeDefinitionListItems"],
+    text: "Signal flare\n: A last-resort call for help in the northern pass.",
+  },
+  {
+    id: "markdown-table",
+    builtinIds: ["excludeMarkdownTables"],
+    text: "| Name | Status |\n| --- | --- |\n| Ada | Ready |",
+  },
+  {
+    id: "quoted-dialogue",
+    builtinIds: ["includeQuotedDialogue"],
+    text: 'She takes a breath. "Only this quoted sentence should be spoken." Then she waits.',
+  },
+  {
+    id: "generic-dialogue",
+    text: 'Alex whispers, "Stay close," then points toward door #3.',
+  },
+  {
+    id: "generic-markdown",
+    text: "A note with [brackets], *emphasis*, `code`, and a link to [home](https://example.com).",
+  },
+  {
+    id: "generic-roleplay",
+    text: "*leans against the wall* \"You came back,\" she says, (almost smiling).",
+  },
+];
 
 export const BUILTIN_VOICE_PLAYBACK_RULES: BuiltinRuleDefinition[] = [
   {
@@ -260,6 +378,39 @@ function collectMatches(text: string, regex: RegExp): Array<{ start: number; end
   }
 
   return matches;
+}
+
+export function findVoicePlaybackRuleExample(
+  rule: Pick<VoicePlaybackRule, "pattern" | "builtinId">,
+): VoicePlaybackRuleExampleMatch | null {
+  const pattern = rule.pattern.trim();
+  if (!pattern) return null;
+
+  const regex = compileVoicePlaybackRegex(pattern);
+  const preferred = rule.builtinId
+    ? VOICE_PLAYBACK_RULE_EXAMPLE_TEXTS.filter((example) =>
+        example.builtinIds?.includes(rule.builtinId as NonNullable<VoicePlaybackRule["builtinId"]>),
+      )
+    : [];
+  const preferredIds = new Set(preferred.map((example) => example.id));
+  const candidates = [
+    ...preferred,
+    ...VOICE_PLAYBACK_RULE_EXAMPLE_TEXTS.filter((example) => !preferredIds.has(example.id)),
+  ];
+
+  for (const example of candidates) {
+    const match = collectMatches(example.text, regex)[0];
+    if (match) {
+      return {
+        datasetId: example.id,
+        text: example.text,
+        matchStart: match.start,
+        matchEnd: match.end,
+      };
+    }
+  }
+
+  return null;
 }
 
 function mergeRanges(ranges: Array<{ start: number; end: number }>): Array<{ start: number; end: number }> {
