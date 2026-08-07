@@ -1,7 +1,7 @@
 use rusqlite::{params, OptionalExtension};
 use serde_json::{Map as JsonMap, Value as JsonValue};
 
-use super::db::{now_ms, open_db};
+use super::db::{now_ms, open_db, tracked_write, tracked_write_string};
 use crate::utils::{log_error, log_info, log_warn};
 
 fn read_character(conn: &rusqlite::Connection, id: &str) -> Result<JsonValue, String> {
@@ -584,11 +584,12 @@ pub fn character_update_chat_appearance(
     let conn = open_db(&app)?;
     let now = now_ms() as i64;
 
-    conn.execute(
-        "UPDATE characters SET chat_appearance = ?, updated_at = ? WHERE id = ?",
-        params![chat_appearance_json, now, id],
-    )
-    .map_err(|e| crate::utils::err_to_string(module_path!(), line!(), e))?;
+    tracked_write(&conn, |tx| {
+        tx.execute(
+            "UPDATE characters SET chat_appearance = ?, updated_at = ? WHERE id = ?",
+            params![chat_appearance_json, now, id],
+        )
+    })?;
 
     let refreshed = read_character(&conn, &id)?;
     serde_json::to_string(&refreshed)
@@ -596,7 +597,7 @@ pub fn character_update_chat_appearance(
 }
 
 fn upsert_character_value(app: &tauri::AppHandle, c: &JsonValue) -> Result<JsonValue, String> {
-    let mut conn = open_db(app)?;
+    let conn = open_db(app)?;
     let id = c
         .get("id")
         .and_then(|v| v.as_str())
@@ -775,9 +776,7 @@ fn upsert_character_value(app: &tauri::AppHandle, c: &JsonValue) -> Result<JsonV
     });
     let now = now_ms() as i64;
 
-    let tx = conn
-        .transaction()
-        .map_err(|e| crate::utils::err_to_string(module_path!(), line!(), e))?;
+    tracked_write_string(&conn, |tx| {
     let existing_character: Option<(i64, Option<String>)> = tx
         .query_row(
             "SELECT created_at, active_lorebook_ids FROM characters WHERE id = ?",
@@ -1050,13 +1049,7 @@ fn upsert_character_value(app: &tauri::AppHandle, c: &JsonValue) -> Result<JsonV
     )
     .map_err(|e| crate::utils::err_to_string(module_path!(), line!(), e))?;
 
-    tx.commit().map_err(|e| {
-        log_error(
-            app,
-            "character_upsert",
-            format!("Failed to commit transaction: {}", e),
-        );
-        e.to_string()
+    Ok(())
     })?;
 
     log_info(
@@ -1076,11 +1069,8 @@ pub fn character_delete(app: tauri::AppHandle, id: String) -> Result<(), String>
         "character_delete",
         format!("Deleting character {}", id),
     );
-    let mut conn = open_db(&app)?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| crate::utils::err_to_string(module_path!(), line!(), e))?;
-
+    let conn = open_db(&app)?;
+    tracked_write_string(&conn, |tx| {
     tx.execute(
         "DELETE FROM memory_embeddings
          WHERE session_kind = 'session'
@@ -1104,8 +1094,8 @@ pub fn character_delete(app: tauri::AppHandle, id: String) -> Result<(), String>
             );
             e.to_string()
         })?;
-    tx.commit()
-        .map_err(|e| crate::utils::err_to_string(module_path!(), line!(), e))?;
+    Ok(())
+    })?;
 
     log_info(
         &app,
@@ -1412,6 +1402,23 @@ pub fn character_clone_deep(app: tauri::AppHandle, id: String) -> Result<String,
         &[],
     )?;
 
+    for fact_id in clone_collect_ids(
+        &tx,
+        "SELECT fact_id FROM companion_soul_facts WHERE character_id = ?",
+        &id,
+    )? {
+        clone_copy_rows(
+            &tx,
+            "companion_soul_facts",
+            &[("character_id", Value::Text(new_char_id.clone()))],
+            &[
+                ("character_id", Value::Text(id.clone())),
+                ("fact_id", Value::Text(fact_id)),
+            ],
+            &[],
+        )?;
+    }
+
     // 12. shared-memory embeddings (session_id == character_id)
     clone_copy_rows(
         &tx,
@@ -1450,6 +1457,49 @@ pub fn character_clone_deep(app: tauri::AppHandle, id: String) -> Result<String,
             &[],
         )?;
         session_map.insert(old, new);
+    }
+
+    for (old_session_id, new_session_id) in &session_map {
+        let episode = tx
+            .query_row(
+                "SELECT persona_key, episode_index, previous_session_id,
+                        started_at, ended_at, updated_at
+                 FROM companion_episodes WHERE session_id = ?1",
+                params![old_session_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, i64>(5)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        if let Some((persona_key, episode_index, previous, started_at, ended_at, updated_at)) =
+            episode
+        {
+            tx.execute(
+                "INSERT INTO companion_episodes (
+                   session_id, character_id, persona_key, episode_index,
+                   previous_session_id, started_at, ended_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    new_session_id,
+                    &new_char_id,
+                    persona_key,
+                    episode_index,
+                    previous.as_ref().and_then(|id| session_map.get(id)),
+                    started_at,
+                    ended_at,
+                    updated_at,
+                ],
+            )
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        }
     }
 
     // 14. per-session: messages, variants, turn effects, embeddings

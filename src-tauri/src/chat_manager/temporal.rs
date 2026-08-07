@@ -212,45 +212,46 @@ pub fn companion_effective_now(session: &Session) -> u64 {
     }
 }
 
-/// Offset `delta` such that a message's effective-frame timestamp is
-/// `created_at + delta`, keeping the transcript consistent with
-/// `companion_effective_now`. `latest_window_created_ms` is the newest message
-/// timestamp in the batch being sent (used to anchor the frozen frame).
-pub fn temporal_frame_delta(session: &Session, latest_window_created_ms: u64) -> i64 {
-    let Some(override_value) = read_time_override(session) else {
-        return 0;
-    };
-    match override_value.mode.as_str() {
-        "frozen" => match override_value.anchor_ms {
-            Some(anchor) => anchor as i64 - latest_window_created_ms as i64,
-            None => 0,
-        },
-        "ticking" => match (override_value.anchor_ms, override_value.set_at_ms) {
-            (Some(anchor), Some(set_at)) => anchor as i64 - set_at as i64,
-            _ => 0,
-        },
-        _ => 0,
+pub fn format_message_timestamp(effective_ms: u64) -> String {
+    let dt = local_datetime_from_ms(effective_ms);
+    format!("<time>{}</time>", dt.format("%Y-%m-%d %H:%M"))
+}
+
+pub fn stored_message_timestamp(message: &crate::chat_manager::types::StoredMessage) -> String {
+    format_message_timestamp(message.effective_at.unwrap_or(message.created_at))
+}
+
+pub fn timestamped_message_content(
+    message: &crate::chat_manager::types::StoredMessage,
+    content: &str,
+) -> String {
+    let prefix = stored_message_timestamp(message);
+    if content.is_empty() {
+        prefix
+    } else {
+        format!("{} {}", prefix, content)
     }
 }
 
-pub fn format_message_timestamp(effective_ms: u64) -> String {
-    let dt = local_datetime_from_ms(effective_ms);
-    format!("[{}]", dt.format("%a %-I:%M %p, %Y-%m-%d"))
+pub fn timestamped_message_text(message: &crate::chat_manager::types::StoredMessage) -> String {
+    timestamped_message_content(message, &message.content)
 }
 
-pub fn message_timestamp_prefix(created_at: u64, frame_delta: i64) -> String {
-    let effective = (created_at as i64 + frame_delta).max(0) as u64;
-    format_message_timestamp(effective)
+fn tagged_timestamp_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"(?im)<\s*time\s*>[^<>\n]{0,48}(?:<\s*/\s*time\s*>|$)\s*")
+            .expect("valid tagged timestamp regex")
+    })
 }
 
 fn echoed_timestamp_regex() -> &'static Regex {
     static REGEX: OnceLock<Regex> = OnceLock::new();
     REGEX.get_or_init(|| {
-        // Matches ONLY the app's own injected stamp, `[Tue 6:50 PM, 2026-03-12]`
-        // (see `format_message_timestamp`), anywhere in the text. The strict
-        // signature — 12-hour clock + AM/PM + ISO date inside brackets — keeps
-        // roleplay brackets like `[she smiles]` and other time formats intact.
-        // The weekday is optional in case a model drops or expands it.
+        // The legacy bracket stamp, `[Tue 6:50 PM, 2026-03-12]`. Still stripped
+        // so transcripts written before the `<time>` format stay clean. The
+        // strict signature (12-hour clock + AM/PM + ISO date inside brackets)
+        // keeps roleplay brackets like `[she smiles]` intact.
         Regex::new(
             r"(?i)\[\s*(?:[a-z]{3,9}\s+)?\d{1,2}:\d{2}\s*(?:am|pm)\s*,?\s*\d{4}-\d{2}-\d{2}\s*\]\s*",
         )
@@ -258,12 +259,30 @@ fn echoed_timestamp_regex() -> &'static Regex {
     })
 }
 
-/// Removes any `[Tue 6:50 PM, 2026-03-12]`-style stamp a model may echo back so
-/// it is never persisted or re-stamped. Strips matches wherever they appear, not
-/// just at the start. Conservative: only matches the app's own time format,
-/// leaving roleplay brackets like `[she smiles]` and unrelated timestamps alone.
+fn leading_invented_stamp_regex() -> &'static Regex {
+    static REGEX: OnceLock<Regex> = OnceLock::new();
+    REGEX.get_or_init(|| {
+        // Narrow vocabulary on purpose: at most two leading words, a clock, and
+        // an optional date, so roleplay openers like `[she checks her watch at
+        // 6:50]` have too many words to match.
+        Regex::new(
+            r"(?i)^\s*[\[\(\*]{1,2}\s*(?:[a-z]{3,9},?\s+){0,2}\d{1,2}:\d{2}(?::\d{2})?\s*(?:am|pm)?\s*,?\s*(?:\d{4}-\d{2}-\d{2}|\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|(?:[a-z]{3,9}\s+)?\d{1,2},?\s*\d{4})?\s*[\]\)\*]{1,2}[\s,:\-]*",
+        )
+        .expect("valid leading invented stamp regex")
+    })
+}
+
+/// Removes any timestamp a model wrote itself, so it is never persisted or
+/// re-stamped. Handles the current `<time>` form, the legacy bracket form
+/// anywhere in the text, and one invented-format stamp at the start of the
+/// reply. Roleplay brackets like `[she smiles]` are left alone.
 pub fn strip_echoed_time_stamps(text: &str) -> String {
-    echoed_timestamp_regex().replace_all(text, "").trim().to_string()
+    let without_tags = tagged_timestamp_regex().replace_all(text, "");
+    let without_legacy = echoed_timestamp_regex().replace_all(&without_tags, "");
+    leading_invented_stamp_regex()
+        .replace(&without_legacy, "")
+        .trim()
+        .to_string()
 }
 
 pub fn time_placeholder_values(reference_ms: u64) -> Vec<(&'static str, String)> {

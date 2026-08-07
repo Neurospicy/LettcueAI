@@ -1,4 +1,5 @@
 pub mod backup;
+pub(crate) mod asr_backup;
 pub mod characters;
 pub mod companion_scheduled_notes;
 pub mod companion_shared_memory;
@@ -16,6 +17,7 @@ pub mod media;
 pub mod memory_embeddings;
 pub mod models;
 pub mod personas;
+pub mod playground;
 pub mod providers;
 pub mod sessions;
 pub mod settings;

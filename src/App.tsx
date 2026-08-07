@@ -19,9 +19,11 @@ import { ModelsPage } from "./ui/pages/settings/ModelsPage";
 import { EditModelPage } from "./ui/pages/settings/EditModelPage";
 import { HuggingFaceBrowserPage } from "./ui/pages/settings/HuggingFaceBrowserPage";
 import { InstalledModelsPage } from "./ui/pages/settings/InstalledModelsPage";
+import { LoraLibraryPage } from "./ui/pages/settings/LoraLibraryPage";
 import PerformancePage from "./ui/pages/settings/PerformancePage";
 import { LocalRuntimeDefaultsPage } from "./ui/pages/settings/LocalRuntimeDefaultsPage";
 import { ImageGenerationPage } from "./ui/pages/settings/ImageGenerationPage";
+import { StableDiffusionSettingsPage } from "./ui/pages/settings/StableDiffusionSettingsPage";
 import { SystemPromptsPage } from "./ui/pages/settings/SystemPromptsPage";
 import { EditPromptTemplate } from "./ui/pages/settings/EditPromptTemplate";
 import { SecurityPage } from "./ui/pages/settings/SecurityPage";
@@ -72,6 +74,7 @@ import {
 } from "./ui/pages/chats";
 import { ThemeProvider } from "./core/theme/ThemeContext";
 import { toast } from "./ui/components/toast";
+import { NanoGptQuotaMonitor } from "./ui/components/NanoGptQuotaMonitor";
 import { DownloadQueueProvider } from "./core/downloads/DownloadQueueContext";
 import {
   CreateCharacterPage,
@@ -83,6 +86,7 @@ import { CreatePersonaPage, EditPersonaPage } from "./ui/pages/personas";
 import ChatTemplateListPage from "./ui/pages/characters/ChatTemplateListPage";
 import ChatTemplateEditorPage from "./ui/pages/characters/ChatTemplateEditorPage";
 import { SearchPage } from "./ui/pages/search";
+import { PlaygroundPage } from "./ui/pages/playground/PlaygroundPage";
 import { LibraryPage } from "./ui/pages/library/LibraryPage";
 import { AvatarLibraryPickerPage } from "./ui/pages/library/ImageLibraryPage";
 import { StandaloneLorebookEditor } from "./ui/pages/library/StandaloneLorebookEditor";
@@ -123,10 +127,16 @@ import { V3UpgradeToast } from "./ui/components/V3UpgradeToast";
 import { ConfirmBottomMenuHost } from "./ui/components/ConfirmBottomMenu";
 import { getLastSeenAppVersion, isOnboardingCompleted } from "./core/storage/appState";
 import { WhatsNewDrawer, WHATS_NEW_OPEN_EVENT } from "./ui/pages/whats-new/WhatsNewPage";
-import { TopNav, BottomNav, TitleBar, WindowResizeHandles } from "./ui/components/App";
+import { TopNav, AppNav, TitleBar, WindowResizeHandles } from "./ui/components/App";
 import { invoke } from "@tauri-apps/api/core";
 import { emit, listen, UnlistenFn } from "@tauri-apps/api/event";
 import { useAndroidBackHandler } from "./ui/hooks/useAndroidBackHandler";
+import {
+  CONTENT_COLUMN_ROUTES,
+  readCachedNavPrefs,
+  writeCachedNavPrefs,
+  type NavPrefs,
+} from "./ui/components/App/navPrefs";
 import { logManager, isLoggingEnabled } from "./core/utils/logger";
 import { getPlatform } from "./core/utils/platform";
 import { I18nProvider, useI18n } from "./core/i18n/context";
@@ -136,13 +146,16 @@ import { detectUpdateChannel } from "./core/app-updates/checkForAppUpdate";
 import { presentAppUpdateToast } from "./core/app-updates/presentAppUpdateToast";
 import {
   readSettings,
+  readSettingsCached,
   refreshSettingsFromStorage,
   SETTINGS_UPDATED_EVENT,
 } from "./core/storage/repo";
+import type { HeaderStyle, NavAlign, NavEdge, NavigationSide, NavigationStyle, NavItemId } from "./core/storage/schemas";
 import { recordChatDebugEvent } from "./core/debug/chatDebugStore";
 
 const chatLog = logManager({ component: "Chat" });
 const FIRST_RUN_TOUR_STORAGE_KEY = "app_tour_v1";
+const isDesktopPlatform = getPlatform().type === "desktop";
 
 function getPayloadObject(value: unknown): Record<string, unknown> | null {
   if (!value || typeof value !== "object") return null;
@@ -602,6 +615,7 @@ function App() {
                 descriptionClassName: "text-xs text-fg/70",
               }}
             />
+            <NanoGptQuotaMonitor />
             <ConfirmBottomMenuHost />
             <WhatsNewDrawer isOpen={whatsNewOpen} onClose={() => setWhatsNewOpen(false)} />
             <DownloadQueueProvider>
@@ -795,6 +809,7 @@ function AppContent() {
   const isChatDetailRoute =
     location.pathname.startsWith("/chat/") || isGroupChatDetailRoute || isEngineChatRoute;
   const isSearchRoute = location.pathname === "/search";
+  const isPlaygroundRoute = location.pathname === "/playground";
   const isAvatarLibraryPickerRoute = location.pathname === "/library/images/pick";
   const isOnboardingRoute = useMemo(
     () =>
@@ -836,6 +851,59 @@ function AppContent() {
     }
   }, [isSettingRoute, location.pathname, location.search]);
 
+  const [navStyle, setNavStyle] = useState<NavigationStyle>(
+    () =>
+      readSettingsCached()?.advancedSettings?.navigationStyle ?? readCachedNavPrefs().style,
+  );
+  const [navSide, setNavSide] = useState<NavigationSide>(
+    () => readSettingsCached()?.advancedSettings?.navigationSide ?? readCachedNavPrefs().side,
+  );
+  const [headerStyle, setHeaderStyle] = useState<HeaderStyle>(
+    () => readSettingsCached()?.advancedSettings?.headerStyle ?? readCachedNavPrefs().header,
+  );
+  const [navItems, setNavItems] = useState<NavItemId[] | null>(
+    () => readSettingsCached()?.advancedSettings?.navItems ?? readCachedNavPrefs().items,
+  );
+  const [navAlign, setNavAlign] = useState<NavAlign>(
+    () => readSettingsCached()?.advancedSettings?.navAlign ?? readCachedNavPrefs().align,
+  );
+  const [navEdge, setNavEdge] = useState<NavEdge>(
+    () => readSettingsCached()?.advancedSettings?.navEdge ?? readCachedNavPrefs().edge,
+  );
+  useEffect(() => {
+    const syncNavStyle = () => {
+      const advanced = readSettingsCached()?.advancedSettings;
+      if (!advanced) return;
+      const cached = readCachedNavPrefs();
+      const next: NavPrefs = {
+        style: advanced.navigationStyle ?? "bottom",
+        side: advanced.navigationSide ?? "left",
+        header: advanced.headerStyle ?? "auto",
+        items: advanced.navItems ?? null,
+        align: advanced.navAlign ?? "start",
+        edge: advanced.navEdge ?? "bottom",
+      };
+      setNavStyle(next.style);
+      setNavSide(next.side);
+      setHeaderStyle(next.header);
+      setNavItems(next.items);
+      setNavAlign(next.align);
+      setNavEdge(next.edge);
+      if (
+        next.style !== cached.style ||
+        next.side !== cached.side ||
+        next.header !== cached.header ||
+        JSON.stringify(next.items) !== JSON.stringify(cached.items) ||
+        next.align !== cached.align ||
+        next.edge !== cached.edge
+      ) {
+        writeCachedNavPrefs(next);
+      }
+    };
+    syncNavStyle();
+    window.addEventListener(SETTINGS_UPDATED_EVENT, syncNavStyle);
+    return () => window.removeEventListener(SETTINGS_UPDATED_EVENT, syncNavStyle);
+  }, []);
   const [isLgViewport, setIsLgViewport] = useState(() =>
     typeof window === "undefined" ? false : window.matchMedia("(min-width: 1024px)").matches,
   );
@@ -845,6 +913,14 @@ function AppContent() {
     mq.addEventListener("change", handler);
     return () => mq.removeEventListener("change", handler);
   }, []);
+  const effectiveNavStyle: NavigationStyle =
+    !isLgViewport && navStyle === "sidebar"
+      ? "bottom"
+      : !isLgViewport && (navStyle === "floatingSidebar" || navStyle === "header")
+        ? navStyle === "header"
+          ? "bottom"
+          : "dock"
+        : navStyle;
 
   const isLogsRoute = location.pathname === "/settings/logs";
 
@@ -862,12 +938,25 @@ function AppContent() {
     [location.pathname],
   );
 
+  const usesInlineHeader =
+    isDesktopPlatform &&
+    isLgViewport &&
+    headerStyle === "inline" &&
+    CONTENT_COLUMN_ROUTES.includes(location.pathname);
+
+  const usesDiscoveryPageHeader =
+    isLgViewport &&
+    (location.pathname === "/discover" || location.pathname === "/discover/browse");
+
   const showTopNav =
     !isOnboardingRoute &&
     !isChatDetailRoute &&
     !isCreateRoute &&
     !isSearchRoute &&
-    !isLorebookEditorRoute;
+    !isLorebookEditorRoute &&
+    !isPlaygroundRoute &&
+    !usesInlineHeader &&
+    !usesDiscoveryPageHeader;
   const showBottomNav =
     !isSettingRoute &&
     !isOnboardingRoute &&
@@ -875,6 +964,7 @@ function AppContent() {
     !isCreateRoute &&
     !isPersonaEditRoute &&
     !isSearchRoute &&
+    !isPlaygroundRoute &&
     !isAvatarLibraryPickerRoute &&
     !isLorebookEditorRoute &&
     !isLorebookGeneratorRoute &&
@@ -1004,15 +1094,25 @@ function AppContent() {
       <WindowResizeHandles />
       <div
         className={`relative z-10 mx-auto flex w-full ${
-          isChatDetailRoute
+          isChatDetailRoute || isPlaygroundRoute
             ? "max-w-full h-[calc(100dvh-var(--titlebar-h,0px))]"
             : isSettingRoute
               ? "max-w-md min-h-[calc(100dvh-var(--titlebar-h,0px))] lg:max-w-none lg:h-[calc(100dvh-var(--titlebar-h,0px))] lg:min-h-0"
               : "max-w-md lg:max-w-none min-h-[calc(100dvh-var(--titlebar-h,0px))]"
-        } flex-col ${showBottomNav ? "pb-[calc(72px+env(safe-area-inset-bottom))]" : "pb-0"}`}
+        } flex-col pl-[var(--appnav-w,0px)] pr-[var(--appnav-wr,0px)] pt-[var(--appnav-ht,0px)] ${showBottomNav ? "pb-[calc(var(--appnav-h,0px)+8px)]" : "pb-0"}`}
       >
         {showTopNav && (
           <TopNav
+            floating={
+              showBottomNav &&
+              headerStyle !== "attached" &&
+              (headerStyle === "floating" ||
+                effectiveNavStyle === "dock" ||
+                effectiveNavStyle === "floatingSidebar")
+            }
+            showNavItems={showBottomNav && effectiveNavStyle === "header"}
+            navItems={isDesktopPlatform ? navItems : null}
+            onCreateClick={() => setShowCreateMenu(true)}
             currentPath={location.pathname + location.search}
             onBackOverride={
               isPersonaEditRoute
@@ -1035,6 +1135,8 @@ function AppContent() {
                   ? "Generate Lorebook"
                   : location.pathname === "/settings/models/installed"
                     ? t("installedModels.title")
+                    : location.pathname === "/settings/image-generation/local"
+                    ? t("imageGeneration.local.engineManager.title")
                     : /^\/settings\/voices\/kokoro\/[^/]+\/blend$/.test(location.pathname)
                       ? t("voices.extra.kokoro.newBlend")
                       : /^\/settings\/voices\/kokoro\/[^/]+\/blend\/.+$/.test(location.pathname)
@@ -1059,7 +1161,9 @@ function AppContent() {
                     ? "overflow-hidden px-0 pt-0 pb-0"
                     : isSearchRoute
                       ? "overflow-hidden px-0 pt-0 pb-0"
-                      : isLogsRoute
+                      : isPlaygroundRoute
+                        ? "overflow-hidden px-0 pt-0 pb-0"
+                        : isLogsRoute
                         ? "overflow-hidden px-0 pt-0 pb-0"
                         : isLorebookEditorRoute
                           ? "overflow-hidden px-0 pt-0 pb-0"
@@ -1071,7 +1175,7 @@ function AppContent() {
                                 ? "overflow-hidden px-0 pt-0 pb-0"
                                 : isSettingRoute
                                   ? "overflow-y-auto px-4 pt-4 pb-6 lg:overflow-hidden lg:p-0 lg:mt-(--topnav-h,72px)"
-                                  : `overflow-y-auto px-4 pt-4 ${showBottomNav ? "pb-[calc(96px+env(safe-area-inset-bottom))]" : "pb-6"}`
+                                  : `overflow-y-auto px-4 pt-4 ${showBottomNav ? "pb-[calc(var(--appnav-h,0px)+32px)]" : "pb-6"}`
           }`}
         >
           <div
@@ -1110,6 +1214,7 @@ function AppContent() {
               <Route path="/discover/search" element={<DiscoverySearchPage />} />
               <Route path="/discover/browse" element={<DiscoveryBrowsePage />} />
               <Route path="/discover/card/:path" element={<DiscoveryCardDetailPage />} />
+              <Route path="/playground" element={<PlaygroundPage />} />
               <Route path="/library" element={<LibraryPage />} />
               <Route path="/library/images/pick" element={<AvatarLibraryPickerPage />} />
               <Route
@@ -1133,6 +1238,7 @@ function AppContent() {
                 <Route path="/settings/models/new" element={<EditModelPage />} />
                 <Route path="/settings/models/browse" element={<HuggingFaceBrowserPage />} />
                 <Route path="/settings/models/installed" element={<InstalledModelsPage />} />
+                <Route path="/settings/models/loras" element={<LoraLibraryPage />} />
                 <Route
                   path="/settings/models/runtime-defaults"
                   element={<LocalRuntimeDefaultsPage />}
@@ -1149,6 +1255,10 @@ function AppContent() {
                   element={<KokoroBlendEditorPage />}
                 />
                 <Route path="/settings/image-generation" element={<ImageGenerationPage />} />
+                <Route
+                  path="/settings/image-generation/local"
+                  element={<StableDiffusionSettingsPage />}
+                />
                 <Route path="/settings/prompts" element={<SystemPromptsPage />} />
                 <Route path="/settings/prompts/new" element={<EditPromptTemplate />} />
                 <Route path="/settings/prompts/:id" element={<EditPromptTemplate />} />
@@ -1295,7 +1405,16 @@ function AppContent() {
           </div>
         </main>
 
-        {showBottomNav && <BottomNav onCreateClick={() => setShowCreateMenu(true)} />}
+        {showBottomNav && effectiveNavStyle !== "header" && (
+          <AppNav
+            style={effectiveNavStyle}
+            side={navSide}
+            align={isDesktopPlatform ? navAlign : "center"}
+            edge={isDesktopPlatform ? navEdge : "bottom"}
+            items={isDesktopPlatform ? navItems : null}
+            onCreateClick={() => setShowCreateMenu(true)}
+          />
+        )}
       </div>
 
       {showBottomNav && (

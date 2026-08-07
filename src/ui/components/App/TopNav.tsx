@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect, useCallback, useRef } from "react";
+import { useMemo, useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { resolveBackTarget } from "../../navigation";
 import {
@@ -21,6 +21,14 @@ import {
 import { motion } from "framer-motion";
 import { typography, interactive, cn } from "../../design-tokens";
 import { dragRegionAttr } from "./TitleBar";
+import { TabItem } from "./NavItem";
+import { resolveCreateAction, resolveNavEntries } from "./navDestinations";
+import {
+  CONTENT_COLUMN_MAX_W_LG,
+  CONTENT_COLUMN_ROUTES,
+  CONTENT_INNER_MAX_W_LG,
+} from "./navPrefs";
+import type { NavItemId } from "../../../core/storage/schemas";
 import { toast } from "../toast";
 import { openDocs } from "../../../core/utils/docs";
 import { type TranslationKey, useI18n } from "../../../core/i18n/context";
@@ -31,13 +39,26 @@ interface TopNavProps {
   onBackOverride?: () => void;
   titleOverride?: string;
   rightAction?: React.ReactNode;
+  floating?: boolean;
+  showNavItems?: boolean;
+  onCreateClick?: () => void;
+  navItems?: readonly NavItemId[] | null;
 }
 
 const appPlatform = getPlatform();
 const isDesktop = appPlatform.type === "desktop";
 const isMacOS = appPlatform.os === "macos";
 
-export function TopNav({ currentPath, onBackOverride, titleOverride, rightAction }: TopNavProps) {
+export function TopNav({
+  currentPath,
+  onBackOverride,
+  titleOverride,
+  rightAction,
+  floating = false,
+  showNavItems = false,
+  onCreateClick,
+  navItems,
+}: TopNavProps) {
   const navigate = useNavigate();
   const { t } = useI18n();
   const basePath = useMemo(() => currentPath.split("?")[0], [currentPath]);
@@ -59,6 +80,7 @@ export function TopNav({ currentPath, onBackOverride, titleOverride, rightAction
       { match: (p) => p.includes("view=advanced"), titleKey: "common.nav.responseStyle" },
       { match: (p) => p === "/settings/models/installed", titleKey: "hfBrowser.libraryTitle" },
       { match: (p) => p === "/settings/models/browse", titleKey: "hfBrowser.title" },
+      { match: (p) => p.startsWith("/settings/models/loras"), titleKey: "loraLibrary.title" },
       {
         match: (p) => p === "/settings/models" || p.startsWith("/settings/models/"),
         titleKey: "common.nav.models",
@@ -211,6 +233,11 @@ export function TopNav({ currentPath, onBackOverride, titleOverride, rightAction
       basePath === "/group-chats"
     );
   }, [basePath]);
+
+  const alignToContentColumn = useMemo(
+    () => CONTENT_COLUMN_ROUTES.includes(basePath),
+    [basePath],
+  );
 
   const showLayoutToggle = useMemo(() => {
     return (
@@ -684,44 +711,94 @@ export function TopNav({ currentPath, onBackOverride, titleOverride, rightAction
   };
 
   const headerRef = useRef<HTMLElement | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
     const el = headerRef.current;
     if (!el) return;
     const publish = () => {
-      document.documentElement.style.setProperty("--topnav-h", `${el.offsetHeight}px`);
+      const titlebar =
+        parseFloat(
+          getComputedStyle(document.documentElement).getPropertyValue("--titlebar-h"),
+        ) || 0;
+      const extent = el.getBoundingClientRect().bottom - titlebar;
+      document.documentElement.style.setProperty("--topnav-h", `${Math.max(0, extent)}px`);
     };
     publish();
     const ro = new ResizeObserver(publish);
     ro.observe(el);
+    window.addEventListener("resize", publish);
     return () => {
       ro.disconnect();
+      window.removeEventListener("resize", publish);
+      document.documentElement.style.setProperty("--topnav-h", "0px");
     };
-  }, []);
+  }, [floating]);
 
   return (
     <header
       ref={headerRef}
-      className="fixed left-0 right-0 top-[var(--titlebar-h,0px)] z-40 border-b border-fg/10 backdrop-blur-md bg-nav/80"
+      className={
+        floating
+          ? cn(
+            "fixed left-[calc(var(--appnav-top-w,0px)+2rem)] right-[calc(var(--appnav-top-wr,0px)+2rem)]",
+            "lg:left-[calc(var(--appnav-top-w,0px)+3rem)] lg:right-[calc(var(--appnav-top-wr,0px)+3rem)] lg:mx-auto",
+            CONTENT_INNER_MAX_W_LG,
+            "top-[calc(var(--titlebar-h,0px)+env(safe-area-inset-top)+12px)] z-40 rounded-full border border-fg/10 shadow-[0_12px_32px_rgba(0,0,0,0.35)] backdrop-blur-md bg-nav/90",
+          )
+          : "fixed left-[var(--appnav-top-w,0px)] right-[var(--appnav-top-wr,0px)] top-[var(--titlebar-h,0px)] z-40 border-b border-fg/10 backdrop-blur-md bg-nav/80 lg:px-4"
+      }
       style={{
-        paddingTop: isDesktop ? "8px" : "calc(env(safe-area-inset-top) + 12px)",
+        paddingTop: isDesktop
+          ? "8px"
+          : floating
+            ? "12px"
+            : "calc(env(safe-area-inset-top) + 12px)",
         paddingBottom: isDesktop ? "8px" : "12px",
       }}
       {...dragRegionAttr}
     >
       <div
-        className="relative mx-auto flex h-10 w-full max-w-md items-center justify-between px-3 lg:max-w-none lg:px-8"
+        className={cn(
+          "relative mx-auto flex h-10 w-full max-w-md items-center justify-between px-3",
+          floating ? "lg:px-6" : "lg:px-8",
+          !floating && alignToContentColumn ? CONTENT_COLUMN_MAX_W_LG : "lg:max-w-none",
+        )}
         style={isMacOS ? { paddingLeft: "72px" } : undefined}
         {...dragRegionAttr}
       >
+        {showNavItems && (
+          <div className="absolute left-1/2 top-1/2 z-10 flex -translate-x-1/2 -translate-y-1/2 items-center gap-2">
+            {resolveNavEntries(navItems).map((entry, index) =>
+              entry.kind === "create" ? (
+                <button
+                  key={`create-${index}`}
+                  onClick={() => resolveCreateAction(basePath, () => onCreateClick?.())}
+                  data-tour-id="nav-create"
+                  className="mx-0.5 flex h-9 w-10 items-center justify-center rounded-xl border border-fg/15 bg-fg/10 text-fg transition hover:border-fg/25 hover:bg-fg/20"
+                  aria-label={t("common.bottomNav.create")}
+                >
+                  <Plus size={18} />
+                </button>
+              ) : (
+                <TabItem
+                  key={entry.destination.id}
+                  to={entry.destination.to}
+                  icon={entry.destination.icon}
+                  label={t(entry.destination.labelKey)}
+                  active={entry.destination.isActive(basePath)}
+                  className="h-9 w-11"
+                  dataTourId={entry.destination.dataTourId}
+                  layoutId="activeTabHeader"
+                  rounded="rounded-xl"
+                  iconSize={20}
+                />
+              ),
+            )}
+          </div>
+        )}
         {/* Left side: */}
         <div className="flex items-center gap-1 overflow-hidden h-full" {...dragRegionAttr}>
-          <div
-            className={cn(
-              "flex items-center justify-center shrink-0",
-              showBackButton ? "w-10" : "w-0",
-            )}
-          >
-            {showBackButton && (
+          {showBackButton && (
+            <div className="flex w-10 shrink-0 items-center justify-center">
               <button
                 onClick={handleBack}
                 className={cn(
@@ -734,8 +811,8 @@ export function TopNav({ currentPath, onBackOverride, titleOverride, rightAction
               >
                 <ArrowLeft size={20} strokeWidth={2.5} />
               </button>
-            )}
-          </div>
+            </div>
+          )}
 
           <motion.h1
             key={title}

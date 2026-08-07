@@ -255,10 +255,9 @@ jobs:
           bun-version: "latest"
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: ./.github/actions/setup-rust-build
         with:
-          toolchain: stable
-          cache: true
+          cache-key: linux-cpu
 
       - name: Free runner disk space
         uses: jlumbroso/free-disk-space@main
@@ -374,6 +373,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       APTABASE_KEY: ${{ secrets.APTABASE_KEY }}
+      CMAKE_CUDA_ARCHITECTURES: "75-virtual;80-virtual;86-real;89-real;90-virtual;120a-real"
 
     steps:
       - name: Checkout
@@ -390,10 +390,10 @@ jobs:
           bun-version: "latest"
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: ./.github/actions/setup-rust-build
         with:
-          toolchain: stable
-          cache: true
+          cache-key: linux-cuda-sm89-sm120a
+          cache-targets: false
 
       - name: Free runner disk space
         uses: jlumbroso/free-disk-space@main
@@ -469,6 +469,12 @@ jobs:
           fi
           BUILD_ARGS+=(--features llama-gpu-cuda --no-bundle)
           bun run tauri "${BUILD_ARGS[@]}"
+
+      - name: Verify Ada and Blackwell CUDA kernels
+        run: |
+          CUDA_IMAGES="$(cuobjdump --list-elf src-tauri/target-cuda/release/lettuceai)"
+          grep -q 'sm_89' <<<"${CUDA_IMAGES}"
+          grep -q 'sm_120a' <<<"${CUDA_IMAGES}"
 
       - name: Bundle Linux CUDA deb
         timeout-minutes: 20
@@ -551,10 +557,10 @@ jobs:
           bun-version: "latest"
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: ./.github/actions/setup-rust-build
         with:
-          toolchain: stable
-          cache: true
+          cache-key: linux-vulkan
+          cache-targets: false
 
       - name: Free runner disk space
         uses: jlumbroso/free-disk-space@main
@@ -768,10 +774,10 @@ jobs:
           echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: ./.github/actions/setup-rust-build
         with:
-          toolchain: stable
-          cache: true
+          cache-key: windows-cpu
+          cache-workspaces: src-tauri -> C:\t
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -863,6 +869,7 @@ jobs:
     env:
       APTABASE_KEY: ${{ secrets.APTABASE_KEY }}
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CMAKE_CUDA_ARCHITECTURES: "75-virtual;80-virtual;86-real;89-real;90-virtual;120a-real"
 
     steps:
       - name: Checkout
@@ -955,10 +962,10 @@ jobs:
           nvcc --version
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: ./.github/actions/setup-rust-build
         with:
-          toolchain: stable
-          cache: true
+          cache-key: windows-cuda-sm89-sm120a
+          cache-targets: false
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -983,6 +990,17 @@ jobs:
           }
           $tauriArgs += @('--features', 'llama-gpu-cuda')
           & bun $tauriArgs
+
+      - name: Verify Ada and Blackwell CUDA kernels
+        shell: pwsh
+        run: |
+          $cudaImages = cuobjdump --list-elf C:\t\release\lettuceai.exe | Out-String
+          if ($cudaImages -notmatch 'sm_89') {
+            throw 'CUDA artifact is missing Ada sm_89 device code.'
+          }
+          if ($cudaImages -notmatch 'sm_120a') {
+            throw 'CUDA artifact is missing Blackwell sm_120a device code.'
+          }
 
       - name: Package Windows CUDA zip
         shell: pwsh
@@ -1213,10 +1231,10 @@ jobs:
           "CMAKE_PREFIX_PATH=$prefix;$env:CMAKE_PREFIX_PATH" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: ./.github/actions/setup-rust-build
         with:
-          toolchain: stable
-          cache: true
+          cache-key: windows-vulkan
+          cache-targets: false
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -1365,13 +1383,10 @@ jobs:
           bun-version: "latest"
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: ./.github/actions/setup-rust-build
         with:
-          toolchain: stable
-          cache: true
-
-      - name: Install Rust target
-        run: rustup target add ${{ matrix.target }}
+          cache-key: macos-cpu-${{ matrix.target }}
+          target: ${{ matrix.target }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -1458,13 +1473,11 @@ jobs:
           bun-version: "latest"
 
       - name: Install Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: ./.github/actions/setup-rust-build
         with:
-          toolchain: stable
-          cache: true
-
-      - name: Install Rust target
-        run: rustup target add ${{ matrix.target }}
+          cache-key: macos-metal-${{ matrix.target }}
+          cache-targets: false
+          target: ${{ matrix.target }}
 
       - name: Install dependencies
         run: bun install --frozen-lockfile

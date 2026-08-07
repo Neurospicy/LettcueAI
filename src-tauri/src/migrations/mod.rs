@@ -7,7 +7,7 @@ use crate::storage_manager::settings::{read_settings_typed, write_settings_typed
 use crate::utils::log_info;
 
 /// Current migration version
-pub const CURRENT_MIGRATION_VERSION: u32 = 79;
+pub const CURRENT_MIGRATION_VERSION: u32 = 91;
 
 pub fn run_migrations(app: &AppHandle) -> Result<(), String> {
     log_info(app, "migrations", "Starting migration check");
@@ -827,6 +827,116 @@ pub fn run_migrations(app: &AppHandle) -> Result<(), String> {
         );
         migrate_v78_to_v79(app)?;
         version = 79;
+    }
+
+    if version < 80 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v79 -> v80: Add shared image LoRA library metadata",
+        );
+        migrate_v79_to_v80(app)?;
+        version = 80;
+    }
+
+    if version < 81 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v80 -> v81: Repair shared image LoRA metadata columns",
+        );
+        migrate_v80_to_v81(app)?;
+        version = 81;
+    }
+
+    if version < 82 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v81 -> v82: Rename stable-diffusion.cpp provider",
+        );
+        migrate_v81_to_v82(app)?;
+        version = 82;
+    }
+
+    if version < 83 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v82 -> v83: Add playground generation history",
+        );
+        migrate_v82_to_v83(app)?;
+        version = 83;
+    }
+
+    if version < 85 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration to v85: Replace sync v1 metadata and repair pre-release sync v2 state",
+        );
+        migrate_to_v85(app)?;
+        version = 85;
+    }
+
+    if version < 86 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v85 -> v86: Add causal ancestry to direct-chat messages",
+        );
+        migrate_v85_to_v86(app)?;
+        version = 86;
+    }
+
+    if version < 87 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v86 -> v87: Rebuild sync journal after causal schema upgrade",
+        );
+        migrate_v86_to_v87(app)?;
+        version = 87;
+    }
+
+    if version < 88 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v87 -> v88: Canonicalize sync table layouts",
+        );
+        migrate_v87_to_v88(app)?;
+        version = 88;
+    }
+
+    if version < 89 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v88 -> v89: Preserve companion continuity across chats",
+        );
+        migrate_v88_to_v89(app)?;
+        version = 89;
+    }
+
+    if version < 90 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v89 -> v90: Normalize companion Soul facts",
+        );
+        migrate_v89_to_v90(app)?;
+        version = 90;
+    }
+
+    if version < 91 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v90 -> v91: Freeze companion message timeline timestamps",
+        );
+        migrate_v90_to_v91(app)?;
+        version = 91;
     }
 
     // Update the stored version
@@ -3944,6 +4054,8 @@ fn migrate_v65_to_v66(app: &AppHandle) -> Result<(), String> {
           memory_status TEXT,
           memory_error TEXT,
           memory_progress_step INTEGER,
+          soul_growth TEXT NOT NULL DEFAULT '[]',
+          relationship_states TEXT NOT NULL DEFAULT '{}',
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           FOREIGN KEY(character_id) REFERENCES characters(id) ON DELETE CASCADE
@@ -4127,6 +4239,919 @@ fn migrate_v78_to_v79(app: &AppHandle) -> Result<(), String> {
         "ALTER TABLE group_message_variants ADD COLUMN usage_json TEXT",
         [],
     );
+    Ok(())
+}
+
+fn migrate_v79_to_v80(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS image_loras (
+          path TEXT PRIMARY KEY,
+          filename TEXT NOT NULL,
+          bytes_on_disk INTEGER NOT NULL DEFAULT 0,
+          modified_at INTEGER NOT NULL DEFAULT 0,
+          sha256 TEXT,
+          keywords TEXT NOT NULL DEFAULT '[]',
+          keyword_source TEXT NOT NULL DEFAULT 'none',
+          architecture TEXT,
+          architecture_source TEXT NOT NULL DEFAULT 'none',
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_image_loras_sha256
+          ON image_loras(sha256)
+          WHERE sha256 IS NOT NULL;
+        "#,
+    )
+    .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    Ok(())
+}
+
+fn migrate_v82_to_v83(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS playground_generations (
+          id TEXT PRIMARY KEY,
+          created_at INTEGER NOT NULL,
+          provider_id TEXT NOT NULL,
+          model_id TEXT NOT NULL,
+          model_name TEXT NOT NULL DEFAULT '',
+          prompt TEXT NOT NULL,
+          negative_prompt TEXT,
+          seed INTEGER,
+          params_json TEXT NOT NULL DEFAULT '{}',
+          status TEXT NOT NULL DEFAULT 'pending',
+          error TEXT,
+          images_json TEXT NOT NULL DEFAULT '[]'
+        );
+        CREATE INDEX IF NOT EXISTS idx_playground_generations_created_at
+          ON playground_generations(created_at);
+        "#,
+    )
+    .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    Ok(())
+}
+
+fn migrate_to_v85(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_sync_v2_schema(&conn)
+}
+
+fn migrate_v85_to_v86(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_v85_to_v86_conn(&conn)
+}
+
+pub(crate) fn run_preflight_migrations(
+    conn: &rusqlite::Connection,
+) -> Result<(), String> {
+    let version = conn
+        .query_row(
+            "SELECT migration_version FROM settings WHERE id = 1",
+            [],
+            |row| row.get::<_, u32>(0),
+        )
+        .unwrap_or(0);
+    if version < 86 {
+        migrate_v85_to_v86_conn(conn)?;
+    } else if version < 87 {
+        migrate_sync_v2_schema(conn)?;
+    }
+    if version >= 87 && version < 88 {
+        migrate_v87_to_v88_conn(conn)?;
+    }
+    if version >= 88 && version < 89 {
+        migrate_v88_to_v89_conn(conn)?;
+    }
+    if version >= 89 && version < 90 {
+        migrate_v89_to_v90_conn(conn)?;
+    }
+    if version >= 90 && version < 91 {
+        migrate_v90_to_v91_conn(conn)?;
+    }
+    Ok(())
+}
+
+fn migrate_v86_to_v87(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_sync_v2_schema(&conn)
+}
+
+fn migrate_v87_to_v88(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_v87_to_v88_conn(&conn)
+}
+
+fn migrate_v88_to_v89(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_v88_to_v89_conn(&conn)
+}
+
+fn migrate_v89_to_v90(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_v89_to_v90_conn(&conn)
+}
+
+fn migrate_v90_to_v91(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_v90_to_v91_conn(&conn)
+}
+
+fn migrate_v90_to_v91_conn(conn: &rusqlite::Connection) -> Result<(), String> {
+    let has_effective_at = conn
+        .prepare("PRAGMA table_info(messages)")
+        .and_then(|mut statement| {
+            let rows = statement.query_map([], |row| row.get::<_, String>(1))?;
+            rows.collect::<Result<Vec<_>, _>>()
+        })
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?
+        .iter()
+        .any(|column| column == "effective_at");
+
+    if !has_effective_at {
+        conn.execute("ALTER TABLE messages ADD COLUMN effective_at INTEGER", [])
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
+    conn.execute(
+        "UPDATE messages
+         SET effective_at = created_at
+         WHERE effective_at IS NULL AND role IN ('user', 'assistant')",
+        [],
+    )
+    .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    if !has_effective_at {
+        migrate_sync_v2_schema(conn)?;
+    }
+    Ok(())
+}
+
+fn migrate_v89_to_v90_conn(conn: &rusqlite::Connection) -> Result<(), String> {
+    conn.execute_batch(
+        r#"
+        CREATE TABLE IF NOT EXISTS companion_soul_facts (
+          fact_id TEXT NOT NULL,
+          character_id TEXT NOT NULL,
+          category TEXT NOT NULL,
+          value TEXT NOT NULL,
+          kind TEXT NOT NULL DEFAULT 'add',
+          policy TEXT NOT NULL DEFAULT 'adaptive',
+          slot TEXT NOT NULL DEFAULT '',
+          confidence REAL NOT NULL DEFAULT 1.0,
+          evidence_count INTEGER NOT NULL DEFAULT 0,
+          weight REAL NOT NULL DEFAULT 1.0,
+          valid_from INTEGER NOT NULL DEFAULT 0,
+          valid_until INTEGER,
+          locked INTEGER NOT NULL DEFAULT 0,
+          source_memory_ids TEXT NOT NULL DEFAULT '[]',
+          created_at INTEGER NOT NULL,
+          supersedes TEXT NOT NULL DEFAULT '[]',
+          superseded_by TEXT,
+          superseded_at INTEGER,
+          updated_at INTEGER NOT NULL,
+          PRIMARY KEY(character_id, fact_id),
+          FOREIGN KEY(character_id) REFERENCES characters(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_companion_soul_facts_character
+          ON companion_soul_facts(character_id, created_at, fact_id);
+
+        CREATE TABLE IF NOT EXISTS companion_episodes (
+          session_id TEXT PRIMARY KEY,
+          character_id TEXT NOT NULL,
+          persona_key TEXT NOT NULL DEFAULT '__default__',
+          episode_index INTEGER NOT NULL,
+          previous_session_id TEXT,
+          started_at INTEGER NOT NULL,
+          ended_at INTEGER,
+          updated_at INTEGER NOT NULL,
+          FOREIGN KEY(character_id) REFERENCES characters(id) ON DELETE CASCADE
+        );
+
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_companion_episodes_sequence
+          ON companion_episodes(character_id, persona_key, episode_index);
+        "#,
+    )
+    .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+
+    let rows = {
+        let mut statement = conn
+            .prepare(
+                "SELECT character_id, soul_growth
+                 FROM companion_shared_memory_state
+                 ORDER BY character_id ASC",
+            )
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        let collected = statement
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        collected
+    };
+
+    for (character_id, soul_growth) in rows {
+        let normalized = crate::storage_manager::companion_shared_memory::sync_normalized_soul_facts(
+            conn,
+            &character_id,
+            &soul_growth,
+        )?;
+        conn.execute(
+            "UPDATE companion_shared_memory_state
+             SET soul_growth = ?1
+             WHERE character_id = ?2",
+            rusqlite::params![normalized, character_id],
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
+
+    let sessions_exist = conn
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sessions'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if sessions_exist {
+        conn.execute_batch(
+            r#"
+            WITH companion_sessions AS (
+              SELECT
+                sessions.id AS session_id,
+                sessions.character_id AS character_id,
+                CASE
+                  WHEN COALESCE(sessions.persona_disabled, 0) = 0
+                    AND TRIM(COALESCE(sessions.persona_id, '')) <> ''
+                  THEN TRIM(sessions.persona_id)
+                  ELSE '__default__'
+                END AS persona_key,
+                sessions.created_at AS started_at,
+                sessions.updated_at AS updated_at
+              FROM sessions
+              JOIN characters ON characters.id = sessions.character_id
+              WHERE LOWER(COALESCE(sessions.mode, '')) = 'companion'
+                 OR LOWER(COALESCE(characters.mode, '')) = 'companion'
+            ), sequenced AS (
+              SELECT
+                session_id,
+                character_id,
+                persona_key,
+                ROW_NUMBER() OVER (
+                  PARTITION BY character_id, persona_key
+                  ORDER BY started_at ASC, session_id ASC
+                ) AS episode_index,
+                LAG(session_id) OVER (
+                  PARTITION BY character_id, persona_key
+                  ORDER BY started_at ASC, session_id ASC
+                ) AS previous_session_id,
+                started_at,
+                LEAD(started_at) OVER (
+                  PARTITION BY character_id, persona_key
+                  ORDER BY started_at ASC, session_id ASC
+                ) AS ended_at,
+                updated_at
+              FROM companion_sessions
+            )
+            INSERT OR IGNORE INTO companion_episodes (
+              session_id, character_id, persona_key, episode_index,
+              previous_session_id, started_at, ended_at, updated_at
+            )
+            SELECT
+              session_id, character_id, persona_key, episode_index,
+              previous_session_id, started_at, ended_at, updated_at
+            FROM sequenced;
+            "#,
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
+
+    migrate_sync_v2_schema(conn)?;
+    conn.execute(
+        "INSERT INTO sync_v2_local_state (key, value)
+         VALUES ('companion_soul_fact_migration', '90')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [],
+    )
+    .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    Ok(())
+}
+
+fn migrate_v88_to_v89_conn(conn: &rusqlite::Connection) -> Result<(), String> {
+    for (column, declaration) in [
+        ("soul_growth", "TEXT NOT NULL DEFAULT '[]'"),
+        ("relationship_states", "TEXT NOT NULL DEFAULT '{}'"),
+    ] {
+        let exists = conn
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM pragma_table_info('companion_shared_memory_state')
+                   WHERE name = ?1
+                 )",
+                [column],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        if !exists {
+            conn.execute(
+                &format!(
+                    "ALTER TABLE companion_shared_memory_state ADD COLUMN {column} {declaration}"
+                ),
+                [],
+            )
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        }
+    }
+
+    let migration_recorded = conn
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sync_v2_local_state
+               WHERE key = 'companion_continuity_migration' AND value = '89'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if migration_recorded {
+        return Ok(());
+    }
+
+    let rows = {
+        let mut statement = conn
+            .prepare(
+                "SELECT sessions.character_id, sessions.persona_id,
+                        sessions.persona_disabled, sessions.companion_state,
+                        sessions.updated_at
+                 FROM sessions
+                 JOIN characters ON characters.id = sessions.character_id
+                 WHERE sessions.companion_state IS NOT NULL
+                   AND (LOWER(sessions.mode) = 'companion'
+                        OR LOWER(COALESCE(characters.mode, '')) = 'companion')
+                 ORDER BY sessions.updated_at ASC, sessions.id ASC",
+            )
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        let collected = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        collected
+    };
+
+    let mut continuity = std::collections::HashMap::<
+        String,
+        (serde_json::Value, serde_json::Map<String, serde_json::Value>, i64),
+    >::new();
+    for (character_id, persona_id, persona_disabled, raw_state, updated_at) in rows {
+        let Ok(state) = serde_json::from_str::<serde_json::Value>(&raw_state) else {
+            continue;
+        };
+        let entry = continuity.entry(character_id).or_insert_with(|| {
+            (
+                serde_json::Value::Array(Vec::new()),
+                serde_json::Map::new(),
+                updated_at,
+            )
+        });
+        if let Some(growth) = state
+            .get("soulGrowth")
+            .filter(|value| value.as_array().is_some_and(|items| !items.is_empty()))
+        {
+            entry.0 = growth.clone();
+        }
+        if let Some(relationship) = state
+            .get("relationshipState")
+            .filter(|value| value.is_object())
+        {
+            let key = if persona_disabled == 0 {
+                persona_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("__default__")
+            } else {
+                "__default__"
+            };
+            entry.1.insert(key.to_string(), relationship.clone());
+        }
+        entry.2 = entry.2.max(updated_at);
+    }
+
+    for (character_id, (soul_growth, relationship_states, updated_at)) in continuity {
+        conn.execute(
+            "INSERT INTO companion_shared_memory_state (
+               character_id, soul_growth, relationship_states, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?4)
+             ON CONFLICT(character_id) DO UPDATE SET
+               soul_growth = excluded.soul_growth,
+               relationship_states = excluded.relationship_states,
+               updated_at = MAX(companion_shared_memory_state.updated_at, excluded.updated_at)",
+            rusqlite::params![
+                character_id,
+                soul_growth.to_string(),
+                serde_json::Value::Object(relationship_states).to_string(),
+                updated_at,
+            ],
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
+
+    migrate_sync_v2_schema(conn)?;
+    conn.execute(
+        "INSERT INTO sync_v2_local_state (key, value)
+         VALUES ('companion_continuity_migration', '89')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        [],
+    )
+    .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    Ok(())
+}
+
+pub(crate) fn migrate_v85_to_v86_conn(
+    conn: &rusqlite::Connection,
+) -> Result<(), String> {
+    let has_parent_message_id = conn
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info('messages')
+               WHERE name = 'parent_message_id'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    if !has_parent_message_id {
+        conn.execute("ALTER TABLE messages ADD COLUMN parent_message_id TEXT", [])
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
+    conn.execute_batch(
+        r#"
+        CREATE INDEX IF NOT EXISTS idx_messages_session_parent
+          ON messages(session_id, parent_message_id);
+        DROP TRIGGER IF EXISTS messages_assign_parent_after_insert;
+        CREATE TRIGGER IF NOT EXISTS messages_assign_parent_after_insert
+        AFTER INSERT ON messages
+        WHEN NEW.parent_message_id IS NULL
+          AND COALESCE((
+            SELECT value FROM sync_v2_local_state
+            WHERE key = 'applying_remote'
+          ), '0') != '1'
+        BEGIN
+          UPDATE messages
+          SET parent_message_id = (
+            SELECT previous.id
+            FROM messages AS previous
+            WHERE previous.session_id = NEW.session_id
+              AND previous.id != NEW.id
+            ORDER BY previous.rowid DESC
+            LIMIT 1
+          )
+          WHERE id = NEW.id;
+        END;
+        WITH ordered AS (
+          SELECT
+            id,
+            LAG(id) OVER (
+              PARTITION BY session_id
+              ORDER BY created_at ASC, id ASC
+            ) AS inferred_parent
+          FROM messages
+        )
+        UPDATE messages
+        SET parent_message_id = (
+          SELECT inferred_parent FROM ordered WHERE ordered.id = messages.id
+        )
+        WHERE parent_message_id IS NULL;
+        "#,
+    )
+    .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+
+    for column in [
+        "parent_session_id",
+        "branched_from_message_id",
+        "root_session_id",
+    ] {
+        let exists = conn
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM pragma_table_info('group_sessions')
+                   WHERE name = ?1
+                 )",
+                [column],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        if !exists {
+            conn.execute(
+                &format!("ALTER TABLE group_sessions ADD COLUMN {column} TEXT"),
+                [],
+            )
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        }
+    }
+    let has_group_parent_message_id = conn
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info('group_messages')
+               WHERE name = 'parent_message_id'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    if !has_group_parent_message_id {
+        conn.execute(
+            "ALTER TABLE group_messages ADD COLUMN parent_message_id TEXT",
+            [],
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
+    conn.execute_batch(
+        r#"
+        UPDATE group_sessions
+        SET root_session_id = id
+        WHERE root_session_id IS NULL;
+        CREATE INDEX IF NOT EXISTS idx_group_sessions_root_session
+          ON group_sessions(root_session_id);
+        CREATE INDEX IF NOT EXISTS idx_group_messages_session_parent
+          ON group_messages(session_id, parent_message_id);
+        DROP TRIGGER IF EXISTS group_messages_assign_parent_after_insert;
+        CREATE TRIGGER group_messages_assign_parent_after_insert
+        AFTER INSERT ON group_messages
+        WHEN NEW.parent_message_id IS NULL
+          AND COALESCE((
+            SELECT value FROM sync_v2_local_state
+            WHERE key = 'applying_remote'
+          ), '0') != '1'
+        BEGIN
+          UPDATE group_messages
+          SET parent_message_id = (
+            SELECT previous.id
+            FROM group_messages AS previous
+            WHERE previous.session_id = NEW.session_id
+              AND previous.id != NEW.id
+            ORDER BY previous.rowid DESC
+            LIMIT 1
+          )
+          WHERE id = NEW.id;
+        END;
+        WITH ordered AS (
+          SELECT
+            id,
+            LAG(id) OVER (
+              PARTITION BY session_id
+              ORDER BY created_at ASC, id ASC
+            ) AS inferred_parent
+          FROM group_messages
+        )
+        UPDATE group_messages
+        SET parent_message_id = (
+          SELECT inferred_parent FROM ordered WHERE ordered.id = group_messages.id
+        )
+        WHERE parent_message_id IS NULL;
+        "#,
+    )
+    .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+
+    migrate_sync_v2_schema(conn)
+}
+
+fn migrate_sync_v2_schema(conn: &rusqlite::Connection) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS sync_v2_change_blobs;
+         DROP TABLE IF EXISTS sync_v2_incoming_revisions;
+         DROP TABLE IF EXISTS sync_v2_row_versions;
+         DROP TABLE IF EXISTS sync_v2_change_context;
+         DROP TABLE IF EXISTS sync_v2_conflicts;
+         DROP TABLE IF EXISTS sync_v2_peer_frontiers;
+         DROP TABLE IF EXISTS sync_v2_frontiers;
+         DROP TABLE IF EXISTS sync_v2_incoming_batches;
+         DROP TABLE IF EXISTS sync_v2_blobs;
+         DROP TABLE IF EXISTS sync_v2_changes;
+         DROP TABLE IF EXISTS sync_v2_local_state;",
+    )
+    .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    crate::sync::v2::create_schema(&tx)
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    tx.execute_batch(
+        "DROP TABLE IF EXISTS sync_peer_cursors;
+         DROP TABLE IF EXISTS sync_entity_heads;
+         DROP TABLE IF EXISTS sync_changes;
+         DROP TABLE IF EXISTS sync_local_state;",
+    )
+    .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    tx.commit()
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))
+}
+
+const GROUP_SESSIONS_V88_COLUMNS: &[&str] = &[
+    "id", "group_character_id", "name", "character_ids", "muted_character_ids",
+    "persona_id", "created_at", "updated_at", "archived", "chat_type",
+    "starting_scene", "background_image_path", "author_note", "lorebook_ids",
+    "disable_character_lorebooks", "memories", "memory_embeddings", "memory_summary",
+    "memory_summary_token_count", "memory_tool_events", "memory_status", "memory_error",
+    "memory_progress_step", "speaker_selection_method", "memory_type", "config_overrides",
+    "parent_session_id", "branched_from_message_id", "root_session_id",
+];
+
+const IMAGE_LORAS_V88_COLUMNS: &[&str] = &[
+    "path", "filename", "bytes_on_disk", "modified_at", "sha256", "keywords",
+    "keyword_source", "architecture", "architecture_source", "created_at", "updated_at",
+];
+
+const LOREBOOK_ENTRIES_V88_COLUMNS: &[&str] = &[
+    "id", "lorebook_id", "title", "enabled", "always_active", "keywords",
+    "case_sensitive", "keyword_match_mode", "content", "priority", "display_order",
+    "created_at", "updated_at",
+];
+
+fn table_column_names(conn: &rusqlite::Connection, table: &str) -> Result<Vec<String>, String> {
+    let escaped_table = table.replace('\'', "''");
+    let mut statement = conn
+        .prepare(&format!(
+            "SELECT name FROM pragma_table_info('{escaped_table}') ORDER BY cid"
+        ))
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    Ok(columns)
+}
+
+fn sync_layouts_are_canonical(conn: &rusqlite::Connection) -> Result<bool, String> {
+    for (table, expected) in [
+        ("group_sessions", GROUP_SESSIONS_V88_COLUMNS),
+        ("image_loras", IMAGE_LORAS_V88_COLUMNS),
+        ("lorebook_entries", LOREBOOK_ENTRIES_V88_COLUMNS),
+    ] {
+        let actual = table_column_names(conn, table)?;
+        if actual.iter().map(String::as_str).collect::<Vec<_>>() != expected {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn migrate_v87_to_v88_conn(conn: &rusqlite::Connection) -> Result<(), String> {
+    let migration_recorded = conn
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sync_v2_local_state
+               WHERE key = 'schema_layout_migration' AND value = '88'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap_or(false);
+    if migration_recorded && sync_layouts_are_canonical(conn)? {
+        return Ok(());
+    }
+
+    let foreign_keys_enabled = conn
+        .query_row("PRAGMA foreign_keys", [], |row| row.get::<_, bool>(0))
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    if foreign_keys_enabled {
+        conn.execute_batch("PRAGMA foreign_keys = OFF;")
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
+
+    let migration_result = (|| -> Result<(), String> {
+        if !sync_layouts_are_canonical(conn)? {
+            let tx = conn
+                .unchecked_transaction()
+                .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+            tx.execute_batch(
+                r#"
+                DROP TABLE IF EXISTS group_sessions_v88;
+                CREATE TABLE group_sessions_v88 (
+                  id TEXT PRIMARY KEY,
+                  group_character_id TEXT,
+                  name TEXT NOT NULL,
+                  character_ids TEXT NOT NULL DEFAULT '[]',
+                  muted_character_ids TEXT NOT NULL DEFAULT '[]',
+                  persona_id TEXT,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL,
+                  archived INTEGER NOT NULL DEFAULT 0,
+                  chat_type TEXT NOT NULL DEFAULT 'conversation',
+                  starting_scene TEXT,
+                  background_image_path TEXT,
+                  author_note TEXT,
+                  lorebook_ids TEXT NOT NULL DEFAULT '[]',
+                  disable_character_lorebooks INTEGER NOT NULL DEFAULT 0,
+                  memories TEXT NOT NULL DEFAULT '[]',
+                  memory_embeddings TEXT NOT NULL DEFAULT '[]',
+                  memory_summary TEXT NOT NULL DEFAULT '',
+                  memory_summary_token_count INTEGER NOT NULL DEFAULT 0,
+                  memory_tool_events TEXT NOT NULL DEFAULT '[]',
+                  memory_status TEXT,
+                  memory_error TEXT,
+                  memory_progress_step INTEGER,
+                  speaker_selection_method TEXT NOT NULL DEFAULT 'llm',
+                  memory_type TEXT NOT NULL DEFAULT 'manual',
+                  config_overrides TEXT NOT NULL DEFAULT '{"version":1}',
+                  parent_session_id TEXT,
+                  branched_from_message_id TEXT,
+                  root_session_id TEXT,
+                  FOREIGN KEY(persona_id) REFERENCES personas(id) ON DELETE SET NULL,
+                  FOREIGN KEY(group_character_id) REFERENCES group_characters(id) ON DELETE SET NULL
+                );
+                INSERT INTO group_sessions_v88 (
+                  id, group_character_id, name, character_ids, muted_character_ids,
+                  persona_id, created_at, updated_at, archived, chat_type,
+                  starting_scene, background_image_path, author_note, lorebook_ids,
+                  disable_character_lorebooks, memories, memory_embeddings,
+                  memory_summary, memory_summary_token_count, memory_tool_events,
+                  memory_status, memory_error, memory_progress_step,
+                  speaker_selection_method, memory_type, config_overrides,
+                  parent_session_id, branched_from_message_id, root_session_id
+                )
+                SELECT
+                  id, group_character_id, name, character_ids, muted_character_ids,
+                  persona_id, created_at, updated_at, archived, chat_type,
+                  starting_scene, background_image_path, author_note, lorebook_ids,
+                  disable_character_lorebooks, memories, memory_embeddings,
+                  memory_summary, memory_summary_token_count, memory_tool_events,
+                  memory_status, memory_error, memory_progress_step,
+                  speaker_selection_method, memory_type, config_overrides,
+                  parent_session_id, branched_from_message_id, root_session_id
+                FROM group_sessions;
+                DROP TABLE group_sessions;
+                ALTER TABLE group_sessions_v88 RENAME TO group_sessions;
+                CREATE INDEX idx_group_sessions_updated ON group_sessions(updated_at);
+                CREATE INDEX idx_group_sessions_group_character ON group_sessions(group_character_id);
+                CREATE INDEX idx_group_sessions_root_session ON group_sessions(root_session_id);
+
+                DROP TABLE IF EXISTS image_loras_v88;
+                CREATE TABLE image_loras_v88 (
+                  path TEXT PRIMARY KEY,
+                  filename TEXT NOT NULL,
+                  bytes_on_disk INTEGER NOT NULL DEFAULT 0,
+                  modified_at INTEGER NOT NULL DEFAULT 0,
+                  sha256 TEXT,
+                  keywords TEXT NOT NULL DEFAULT '[]',
+                  keyword_source TEXT NOT NULL DEFAULT 'none',
+                  architecture TEXT,
+                  architecture_source TEXT NOT NULL DEFAULT 'none',
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL
+                );
+                INSERT INTO image_loras_v88 (
+                  path, filename, bytes_on_disk, modified_at, sha256, keywords,
+                  keyword_source, architecture, architecture_source, created_at, updated_at
+                )
+                SELECT
+                  path, filename, bytes_on_disk, modified_at, sha256, keywords,
+                  keyword_source, architecture, architecture_source, created_at, updated_at
+                FROM image_loras;
+                DROP TABLE image_loras;
+                ALTER TABLE image_loras_v88 RENAME TO image_loras;
+                CREATE INDEX idx_image_loras_sha256
+                  ON image_loras(sha256)
+                  WHERE sha256 IS NOT NULL;
+
+                DROP TABLE IF EXISTS lorebook_entries_v88;
+                CREATE TABLE lorebook_entries_v88 (
+                  id TEXT PRIMARY KEY,
+                  lorebook_id TEXT NOT NULL,
+                  title TEXT NOT NULL DEFAULT '',
+                  enabled INTEGER NOT NULL DEFAULT 1,
+                  always_active INTEGER NOT NULL DEFAULT 0,
+                  keywords TEXT NOT NULL DEFAULT '[]',
+                  case_sensitive INTEGER NOT NULL DEFAULT 0,
+                  keyword_match_mode TEXT NOT NULL DEFAULT 'literal',
+                  content TEXT NOT NULL,
+                  priority INTEGER NOT NULL DEFAULT 0,
+                  display_order INTEGER NOT NULL DEFAULT 0,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL,
+                  FOREIGN KEY(lorebook_id) REFERENCES lorebooks(id) ON DELETE CASCADE
+                );
+                INSERT INTO lorebook_entries_v88 (
+                  id, lorebook_id, title, enabled, always_active, keywords,
+                  case_sensitive, keyword_match_mode, content, priority,
+                  display_order, created_at, updated_at
+                )
+                SELECT
+                  id, lorebook_id, title, enabled, always_active, keywords,
+                  case_sensitive, keyword_match_mode, content, priority,
+                  display_order, created_at, updated_at
+                FROM lorebook_entries;
+                DROP TABLE lorebook_entries;
+                ALTER TABLE lorebook_entries_v88 RENAME TO lorebook_entries;
+                CREATE INDEX idx_lorebook_entries_lorebook
+                  ON lorebook_entries(lorebook_id);
+                CREATE INDEX idx_lorebook_entries_enabled
+                  ON lorebook_entries(lorebook_id, enabled);
+                "#,
+            )
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+
+            let foreign_key_violations = tx
+                .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+            if foreign_key_violations != 0 {
+                return Err(format!(
+                    "canonical sync schema migration found {foreign_key_violations} foreign key violations"
+                ));
+            }
+            tx.commit()
+                .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        }
+
+        migrate_sync_v2_schema(conn)?;
+        conn.execute(
+            "INSERT INTO sync_v2_local_state (key, value)
+             VALUES ('schema_layout_migration', '88')
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [],
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        Ok(())
+    })();
+
+    let restore_result = if foreign_keys_enabled {
+        conn.execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))
+    } else {
+        Ok(())
+    };
+    migration_result?;
+    restore_result
+}
+
+fn migrate_v80_to_v81(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_image_lora_metadata_columns(&conn)
+}
+
+fn migrate_v81_to_v82(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    conn.execute(
+        "UPDATE provider_credentials SET label = ?1 WHERE provider_id = ?2 AND label = ?3",
+        rusqlite::params!["stable-diffusion.cpp", "sdcpp", "Local Image Generation"],
+    )
+    .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    Ok(())
+}
+
+fn migrate_image_lora_metadata_columns(conn: &rusqlite::Connection) -> Result<(), String> {
+    let has_column = |name: &str| -> Result<bool, String> {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('image_loras') WHERE name = ?1)",
+            [name],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))
+    };
+
+    if !has_column("keyword_source")? {
+        conn.execute(
+            "ALTER TABLE image_loras ADD COLUMN keyword_source TEXT NOT NULL DEFAULT 'none'",
+            [],
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
+    if !has_column("architecture_source")? {
+        conn.execute(
+            "ALTER TABLE image_loras ADD COLUMN architecture_source TEXT NOT NULL DEFAULT 'none'",
+            [],
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
+    if has_column("metadata_source")? {
+        conn.execute(
+            "UPDATE image_loras
+             SET keyword_source = CASE
+                    WHEN keywords != '[]' AND keyword_source = 'none' THEN metadata_source
+                    ELSE keyword_source
+                 END,
+                 architecture_source = CASE
+                    WHEN architecture IS NOT NULL AND architecture_source = 'none' THEN metadata_source
+                    ELSE architecture_source
+                 END",
+            [],
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
     Ok(())
 }
 
@@ -4356,4 +5381,598 @@ fn migrate_v71_to_v72(app: &AppHandle) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        migrate_image_lora_metadata_columns, migrate_sync_v2_schema,
+        migrate_v87_to_v88_conn, migrate_v88_to_v89_conn, migrate_v89_to_v90_conn,
+        migrate_v90_to_v91_conn,
+        run_preflight_migrations,
+        table_column_names,
+        GROUP_SESSIONS_V88_COLUMNS, IMAGE_LORAS_V88_COLUMNS,
+        LOREBOOK_ENTRIES_V88_COLUMNS,
+    };
+
+    #[test]
+    fn v89_backfills_latest_soul_growth_and_persona_relationships() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE characters (
+              id TEXT PRIMARY KEY,
+              mode TEXT,
+              companion TEXT
+            );
+            CREATE TABLE sessions (
+              id TEXT PRIMARY KEY,
+              character_id TEXT NOT NULL,
+              persona_id TEXT,
+              persona_disabled INTEGER NOT NULL DEFAULT 0,
+              mode TEXT NOT NULL,
+              companion_state TEXT,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE companion_shared_memory_state (
+              character_id TEXT PRIMARY KEY,
+              memories TEXT NOT NULL DEFAULT '[]',
+              memory_summary TEXT,
+              memory_summary_token_count INTEGER NOT NULL DEFAULT 0,
+              memory_tool_events TEXT NOT NULL DEFAULT '[]',
+              memory_status TEXT,
+              memory_error TEXT,
+              memory_progress_step INTEGER,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            INSERT INTO characters VALUES ('companion', 'companion', '{}');
+            INSERT INTO sessions VALUES (
+              'older', 'companion', 'persona-a', 0, 'companion',
+              '{"soulGrowth":[{"id":"old"}],"relationshipState":{"trust":0.4},"emotionalState":{"felt":{"calm":0.1}}}',
+              10
+            );
+            INSERT INTO sessions VALUES (
+              'newer', 'companion', 'persona-a', 0, 'companion',
+              '{"soulGrowth":[{"id":"new"}],"relationshipState":{"trust":0.8},"emotionalState":{"felt":{"calm":0.9}}}',
+              20
+            );
+            INSERT INTO sessions VALUES (
+              'other-persona', 'companion', 'persona-b', 0, 'companion',
+              '{"soulGrowth":[],"relationshipState":{"trust":-0.3}}',
+              30
+            );
+            "#,
+        )
+        .unwrap();
+        crate::sync::v2::create_schema(&conn).unwrap();
+
+        migrate_v88_to_v89_conn(&conn).unwrap();
+        migrate_v88_to_v89_conn(&conn).unwrap();
+
+        let (soul_growth, relationships): (String, String) = conn
+            .query_row(
+                "SELECT soul_growth, relationship_states
+                 FROM companion_shared_memory_state WHERE character_id = 'companion'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let soul_growth: serde_json::Value = serde_json::from_str(&soul_growth).unwrap();
+        let relationships: serde_json::Value = serde_json::from_str(&relationships).unwrap();
+
+        assert_eq!(soul_growth[0]["id"], "new");
+        assert_eq!(relationships["persona-a"]["trust"], 0.8);
+        assert_eq!(relationships["persona-b"]["trust"], -0.3);
+        assert!(relationships.get("emotionalState").is_none());
+    }
+
+    #[test]
+    fn v90_normalizes_legacy_soul_growth_into_individual_facts() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE characters (id TEXT PRIMARY KEY);
+            CREATE TABLE companion_shared_memory_state (
+              character_id TEXT PRIMARY KEY,
+              soul_growth TEXT NOT NULL DEFAULT '[]'
+            );
+            INSERT INTO characters VALUES ('companion');
+            INSERT INTO companion_shared_memory_state VALUES (
+              'companion',
+              '[{"category":"likes","value":"Cardamom buns","sourceMemoryIds":["memory-1"]}]'
+            );
+            "#,
+        )
+        .unwrap();
+
+        migrate_v89_to_v90_conn(&conn).unwrap();
+
+        let fact: (String, String, String, f64, i64) = conn
+            .query_row(
+                "SELECT fact_id, policy, slot, confidence, evidence_count
+                 FROM companion_soul_facts
+                 WHERE character_id = 'companion'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+            )
+            .unwrap();
+        assert!(!fact.0.is_empty());
+        assert_eq!(fact.1, "current");
+        assert_eq!(fact.2, "likes");
+        assert_eq!(fact.3, 1.0);
+        assert_eq!(fact.4, 1);
+
+        let mirror: String = conn
+            .query_row(
+                "SELECT soul_growth FROM companion_shared_memory_state WHERE character_id = 'companion'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mirror: serde_json::Value = serde_json::from_str(&mirror).unwrap();
+        assert_eq!(mirror[0]["id"], fact.0);
+        assert_eq!(mirror[0]["policy"], "current");
+    }
+
+    #[test]
+    fn v90_backfills_companion_sessions_as_ordered_episodes() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE characters (id TEXT PRIMARY KEY, mode TEXT);
+            CREATE TABLE sessions (
+              id TEXT PRIMARY KEY,
+              character_id TEXT NOT NULL,
+              persona_id TEXT,
+              persona_disabled INTEGER NOT NULL DEFAULT 0,
+              mode TEXT NOT NULL,
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE companion_shared_memory_state (
+              character_id TEXT PRIMARY KEY,
+              soul_growth TEXT NOT NULL DEFAULT '[]'
+            );
+            INSERT INTO characters VALUES ('companion', 'companion');
+            INSERT INTO companion_shared_memory_state VALUES ('companion', '[]');
+            INSERT INTO sessions VALUES ('later', 'companion', 'persona-a', 0, 'companion', 20, 25);
+            INSERT INTO sessions VALUES ('earlier', 'companion', 'persona-a', 0, 'companion', 10, 15);
+            INSERT INTO sessions VALUES ('other', 'companion', 'persona-b', 0, 'companion', 12, 18);
+            "#,
+        )
+        .unwrap();
+
+        migrate_v89_to_v90_conn(&conn).unwrap();
+
+        let later: (i64, Option<String>, Option<i64>) = conn
+            .query_row(
+                "SELECT episode_index, previous_session_id, ended_at
+                 FROM companion_episodes WHERE session_id = 'later'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(later.0, 2);
+        assert_eq!(later.1.as_deref(), Some("earlier"));
+        assert_eq!(later.2, None);
+
+        let earlier_ended: Option<i64> = conn
+            .query_row(
+                "SELECT ended_at FROM companion_episodes WHERE session_id = 'earlier'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(earlier_ended, Some(20));
+
+        let other_index: i64 = conn
+            .query_row(
+                "SELECT episode_index FROM companion_episodes WHERE session_id = 'other'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(other_index, 1);
+    }
+
+    #[test]
+    fn repairs_the_partial_image_lora_schema() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE image_loras (
+              path TEXT PRIMARY KEY,
+              filename TEXT NOT NULL,
+              bytes_on_disk INTEGER NOT NULL DEFAULT 0,
+              modified_at INTEGER NOT NULL DEFAULT 0,
+              sha256 TEXT,
+              keywords TEXT NOT NULL DEFAULT '[]',
+              architecture TEXT,
+              metadata_source TEXT NOT NULL DEFAULT 'none',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            "#,
+        )
+        .unwrap();
+
+        migrate_image_lora_metadata_columns(&conn).unwrap();
+        migrate_image_lora_metadata_columns(&conn).unwrap();
+
+        let columns = conn
+            .prepare("SELECT name FROM pragma_table_info('image_loras')")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "keyword_source"));
+        assert!(columns.iter().any(|column| column == "architecture_source"));
+    }
+
+    #[test]
+    fn sync_v2_migration_replaces_v1_metadata_idempotently() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE sync_peer_cursors (id TEXT PRIMARY KEY);
+             CREATE TABLE sync_entity_heads (id TEXT PRIMARY KEY);
+             CREATE TABLE sync_changes (id TEXT PRIMARY KEY);
+             CREATE TABLE sync_local_state (id TEXT PRIMARY KEY);",
+        )
+        .unwrap();
+
+        migrate_sync_v2_schema(&conn).unwrap();
+        migrate_sync_v2_schema(&conn).unwrap();
+
+        for old_table in [
+            "sync_peer_cursors",
+            "sync_entity_heads",
+            "sync_changes",
+            "sync_local_state",
+        ] {
+            let exists = conn
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+                     )",
+                    [old_table],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap();
+            assert!(!exists, "{old_table} should be removed");
+        }
+        for new_table in [
+            "sync_v2_local_state",
+            "sync_v2_changes",
+            "sync_v2_frontiers",
+            "sync_v2_row_versions",
+            "sync_v2_conflicts",
+            "sync_v2_incoming_batches",
+            "sync_v2_blobs",
+        ] {
+            let exists = conn
+                .query_row(
+                    "SELECT EXISTS(
+                       SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = ?1
+                     )",
+                    [new_table],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap();
+            assert!(exists, "{new_table} should be created");
+        }
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn v85_preflight_migrates_existing_chat_tables_before_indexes() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settings (
+               id INTEGER PRIMARY KEY,
+               migration_version INTEGER NOT NULL
+             );
+             INSERT INTO settings VALUES (1, 85);
+             CREATE TABLE sessions (id TEXT PRIMARY KEY);
+             CREATE TABLE messages (
+               id TEXT PRIMARY KEY,
+               session_id TEXT NOT NULL,
+               role TEXT NOT NULL,
+               content TEXT NOT NULL,
+               created_at INTEGER NOT NULL
+             );
+             CREATE TABLE group_sessions (
+               id TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               created_at INTEGER NOT NULL,
+               updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE group_messages (
+               id TEXT PRIMARY KEY,
+               session_id TEXT NOT NULL,
+               role TEXT NOT NULL,
+               content TEXT NOT NULL,
+               created_at INTEGER NOT NULL
+             );
+             INSERT INTO sessions VALUES ('chat');
+             INSERT INTO messages VALUES ('first', 'chat', 'user', 'one', 1);
+             INSERT INTO messages VALUES ('second', 'chat', 'assistant', 'two', 2);
+             INSERT INTO group_sessions VALUES ('group', 'Group', 1, 1);
+             INSERT INTO group_messages VALUES ('group-first', 'group', 'user', 'one', 1);
+             INSERT INTO group_messages VALUES ('group-second', 'group', 'assistant', 'two', 2);",
+        )
+        .unwrap();
+        crate::sync::v2::create_schema(&conn).unwrap();
+        let stale_revision =
+            crate::sync::v2::capture_transaction(&conn, "device-before-migration", 10, |tx| {
+                tx.execute(
+                    "UPDATE messages SET content = 'old schema revision' WHERE id = 'second'",
+                    [],
+                )
+            })
+            .unwrap()
+            .revision;
+        assert!(stale_revision.is_some());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM sync_v2_changes", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
+
+        run_preflight_migrations(&conn).unwrap();
+        run_preflight_migrations(&conn).unwrap();
+
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM sync_v2_changes", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0,
+            "schema migration must invalidate revisions captured under the old fingerprint"
+        );
+
+        for (table, column) in [
+            ("messages", "parent_message_id"),
+            ("group_messages", "parent_message_id"),
+            ("group_sessions", "parent_session_id"),
+            ("group_sessions", "branched_from_message_id"),
+            ("group_sessions", "root_session_id"),
+        ] {
+            let exists = conn
+                .query_row(
+                    &format!(
+                        "SELECT EXISTS(
+                           SELECT 1 FROM pragma_table_info('{table}')
+                           WHERE name = ?1
+                         )"
+                    ),
+                    [column],
+                    |row| row.get::<_, bool>(0),
+                )
+                .unwrap();
+            assert!(exists, "{table}.{column} should exist");
+        }
+        let parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_message_id FROM messages WHERE id = 'second'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent.as_deref(), Some("first"));
+        conn.execute(
+            "INSERT INTO messages (
+               id, session_id, role, content, created_at, parent_message_id
+             ) VALUES ('third', 'chat', 'user', 'three', 3, NULL)",
+            [],
+        )
+        .unwrap();
+        let trigger_parent: Option<String> = conn
+            .query_row(
+                "SELECT parent_message_id FROM messages WHERE id = 'third'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(trigger_parent.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn v86_preflight_discards_revisions_with_the_old_schema_fingerprint() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE settings (
+               id INTEGER PRIMARY KEY,
+               migration_version INTEGER NOT NULL
+             );
+             INSERT INTO settings VALUES (1, 86);
+             CREATE TABLE notes (
+               id TEXT PRIMARY KEY,
+               content TEXT NOT NULL
+             );
+             INSERT INTO notes VALUES ('note', 'before');",
+        )
+        .unwrap();
+        crate::sync::v2::create_schema(&conn).unwrap();
+        let revision =
+            crate::sync::v2::capture_transaction(&conn, "device-old-schema", 10, |tx| {
+                tx.execute(
+                    "UPDATE notes SET content = 'stale revision' WHERE id = 'note'",
+                    [],
+                )
+            })
+            .unwrap()
+            .revision;
+        assert!(revision.is_some());
+
+        run_preflight_migrations(&conn).unwrap();
+
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM sync_v2_changes", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            0
+        );
+        assert!(crate::sync::v2::load_frontier(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn v88_canonicalizes_upgraded_sync_tables_without_losing_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            PRAGMA foreign_keys = ON;
+            CREATE TABLE settings (id INTEGER PRIMARY KEY, migration_version INTEGER NOT NULL);
+            INSERT INTO settings VALUES (1, 87);
+            CREATE TABLE personas (id TEXT PRIMARY KEY);
+            CREATE TABLE group_characters (id TEXT PRIMARY KEY);
+            CREATE TABLE lorebooks (id TEXT PRIMARY KEY);
+            INSERT INTO personas VALUES ('persona');
+            INSERT INTO group_characters VALUES ('group-config');
+            INSERT INTO lorebooks VALUES ('lorebook');
+
+            CREATE TABLE group_sessions (
+              id TEXT PRIMARY KEY, group_character_id TEXT, name TEXT NOT NULL,
+              character_ids TEXT NOT NULL DEFAULT '[]', muted_character_ids TEXT NOT NULL DEFAULT '[]',
+              persona_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+              archived INTEGER NOT NULL DEFAULT 0, chat_type TEXT NOT NULL DEFAULT 'conversation',
+              starting_scene TEXT, background_image_path TEXT, author_note TEXT,
+              lorebook_ids TEXT NOT NULL DEFAULT '[]', disable_character_lorebooks INTEGER NOT NULL DEFAULT 0,
+              memories TEXT NOT NULL DEFAULT '[]', memory_embeddings TEXT NOT NULL DEFAULT '[]',
+              memory_summary TEXT NOT NULL DEFAULT '', memory_summary_token_count INTEGER NOT NULL DEFAULT 0,
+              memory_tool_events TEXT NOT NULL DEFAULT '[]', memory_status TEXT, memory_error TEXT,
+              memory_progress_step INTEGER, speaker_selection_method TEXT NOT NULL DEFAULT 'llm',
+              config_overrides TEXT NOT NULL DEFAULT '{"version":1}', parent_session_id TEXT,
+              branched_from_message_id TEXT, root_session_id TEXT,
+              memory_type TEXT NOT NULL DEFAULT 'manual',
+              FOREIGN KEY(persona_id) REFERENCES personas(id) ON DELETE SET NULL,
+              FOREIGN KEY(group_character_id) REFERENCES group_characters(id) ON DELETE SET NULL
+            );
+            INSERT INTO group_sessions (
+              id, group_character_id, name, persona_id, created_at, updated_at,
+              root_session_id, memory_type
+            ) VALUES ('session', 'group-config', 'Preserved group', 'persona', 10, 20, 'session', 'dynamic');
+            CREATE TABLE group_messages (
+              id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+              FOREIGN KEY(session_id) REFERENCES group_sessions(id) ON DELETE CASCADE
+            );
+            INSERT INTO group_messages VALUES ('message', 'session');
+
+            CREATE TABLE image_loras (
+              path TEXT PRIMARY KEY, filename TEXT NOT NULL, bytes_on_disk INTEGER NOT NULL DEFAULT 0,
+              modified_at INTEGER NOT NULL DEFAULT 0, sha256 TEXT, keywords TEXT NOT NULL DEFAULT '[]',
+              architecture TEXT, metadata_source TEXT NOT NULL DEFAULT 'none', created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL, keyword_source TEXT NOT NULL DEFAULT 'none',
+              architecture_source TEXT NOT NULL DEFAULT 'none'
+            );
+            INSERT INTO image_loras VALUES (
+              'model.gguf', 'model.gguf', 42, 7, 'hash', '["trigger"]',
+              'flux', 'header', 11, 12, 'header', 'header'
+            );
+
+            CREATE TABLE lorebook_entries (
+              id TEXT PRIMARY KEY, lorebook_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+              enabled INTEGER NOT NULL DEFAULT 1, always_active INTEGER NOT NULL DEFAULT 0,
+              keywords TEXT NOT NULL DEFAULT '[]', case_sensitive INTEGER NOT NULL DEFAULT 0,
+              content TEXT NOT NULL, priority INTEGER NOT NULL DEFAULT 0,
+              display_order INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL, keyword_match_mode TEXT NOT NULL DEFAULT 'literal',
+              FOREIGN KEY(lorebook_id) REFERENCES lorebooks(id) ON DELETE CASCADE
+            );
+            INSERT INTO lorebook_entries (
+              id, lorebook_id, title, content, created_at, updated_at, keyword_match_mode
+            ) VALUES ('entry', 'lorebook', 'Title', 'Body', 1, 2, 'regex');
+            "#,
+        )
+        .unwrap();
+        crate::sync::v2::create_schema(&conn).unwrap();
+
+        migrate_v87_to_v88_conn(&conn).unwrap();
+        migrate_v87_to_v88_conn(&conn).unwrap();
+
+        assert_eq!(table_column_names(&conn, "group_sessions").unwrap(), GROUP_SESSIONS_V88_COLUMNS);
+        assert_eq!(table_column_names(&conn, "image_loras").unwrap(), IMAGE_LORAS_V88_COLUMNS);
+        assert_eq!(table_column_names(&conn, "lorebook_entries").unwrap(), LOREBOOK_ENTRIES_V88_COLUMNS);
+        assert_eq!(
+            conn.query_row(
+                "SELECT name || ':' || memory_type FROM group_sessions WHERE id = 'session'",
+                [],
+                |row| row.get::<_, String>(0),
+            ).unwrap(),
+            "Preserved group:dynamic"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT keyword_source || ':' || architecture_source FROM image_loras WHERE path = 'model.gguf'",
+                [],
+                |row| row.get::<_, String>(0),
+            ).unwrap(),
+            "header:header"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT keyword_match_mode || ':' || content FROM lorebook_entries WHERE id = 'entry'",
+                [],
+                |row| row.get::<_, String>(0),
+            ).unwrap(),
+            "regex:Body"
+        );
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get::<_, i64>(0)).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn v91_backfills_immutable_message_time_and_keeps_canonical_column_order() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE messages (
+               id TEXT PRIMARY KEY,
+               session_id TEXT NOT NULL,
+               role TEXT NOT NULL,
+               content TEXT NOT NULL,
+               created_at INTEGER NOT NULL,
+               parent_message_id TEXT
+             );
+             INSERT INTO messages VALUES ('user', 'chat', 'user', 'hello', 1234, NULL);
+             INSERT INTO messages VALUES ('scene', 'chat', 'scene', 'setting', 1200, NULL);",
+        )
+        .unwrap();
+
+        migrate_v90_to_v91_conn(&conn).unwrap();
+        migrate_v90_to_v91_conn(&conn).unwrap();
+
+        let columns = table_column_names(&conn, "messages").unwrap();
+        assert_eq!(columns.last().map(String::as_str), Some("effective_at"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT effective_at FROM messages WHERE id = 'user'",
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap(),
+            Some(1234)
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT effective_at FROM messages WHERE id = 'scene'",
+                [],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .unwrap(),
+            None
+        );
+    }
 }

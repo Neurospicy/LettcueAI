@@ -795,7 +795,7 @@ fn export_sessions(app: &tauri::AppHandle) -> Result<Vec<JsonValue>, String> {
     for (session_id, mut session_json) in sessions {
         let mut messages_stmt = conn
             .prepare("SELECT id, role, content, created_at, visible_in_chat, scene_edited, prompt_tokens, completion_tokens, total_tokens,
-                             first_token_ms, tokens_per_second, mtp_stats, model_id, selected_variant_id, is_pinned, memory_refs, used_lorebook_entries, attachments, reasoning FROM messages
+                             first_token_ms, tokens_per_second, mtp_stats, model_id, selected_variant_id, is_pinned, memory_refs, used_lorebook_entries, attachments, reasoning, effective_at FROM messages
                       WHERE session_id = ? ORDER BY created_at ASC")
             .map_err(|e| crate::utils::err_to_string(module_path!(), line!(), e))?;
 
@@ -822,6 +822,7 @@ fn export_sessions(app: &tauri::AppHandle) -> Result<Vec<JsonValue>, String> {
                     "used_lorebook_entries": r.get::<_, String>(16)?,
                     "attachments": r.get::<_, String>(17)?,
                     "reasoning": r.get::<_, Option<String>>(18)?,
+                    "effective_at": r.get::<_, Option<i64>>(19)?,
                 });
                 Ok((msg_id, json))
             })
@@ -2348,9 +2349,9 @@ fn import_characters(app: &tauri::AppHandle, data: &JsonValue) -> Result<(), Str
 
 fn export_asr_learning(app: &tauri::AppHandle) -> Result<JsonValue, String> {
     let conn = open_db(app)?;
-    let vocabulary_terms = crate::sync::db::fetch_asr_vocabulary_terms(&conn)?;
-    let corrections = crate::sync::db::fetch_asr_corrections(&conn)?;
-    let ignored_suggestions = crate::sync::db::fetch_asr_ignored_suggestions(&conn)?;
+    let vocabulary_terms = super::asr_backup::fetch_vocabulary_terms(&conn)?;
+    let corrections = super::asr_backup::fetch_corrections(&conn)?;
+    let ignored_suggestions = super::asr_backup::fetch_ignored_suggestions(&conn)?;
     Ok(serde_json::json!({
         "vocabularyTerms": vocabulary_terms,
         "corrections": corrections,
@@ -2382,7 +2383,7 @@ fn import_asr_learning(app: &tauri::AppHandle, data: &JsonValue) -> Result<(), S
     let tx = conn
         .transaction()
         .map_err(|e| crate::utils::err_to_string(module_path!(), line!(), e))?;
-    crate::sync::db::apply_asr_learning_tables(
+    super::asr_backup::apply_learning_tables(
         &tx,
         &vocabulary_terms,
         &corrections,
@@ -2571,17 +2572,33 @@ fn import_sessions(app: &tauri::AppHandle, data: &JsonValue) -> Result<(), Strin
             if let Some(messages) = item.get("messages").and_then(|v| v.as_array()) {
                 for msg in messages {
                     let msg_id = msg.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                    let role = msg
+                        .get("role")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("assistant");
+                    let created_at = msg.get("created_at").and_then(|v| v.as_i64());
+                    let effective_at = msg
+                        .get("effective_at")
+                        .and_then(|v| v.as_i64())
+                        .or_else(|| {
+                            if matches!(role, "user" | "assistant") {
+                                created_at
+                            } else {
+                                None
+                            }
+                        });
 
                     conn.execute(
-                        "INSERT INTO messages (id, session_id, role, content, created_at, visible_in_chat, scene_edited, prompt_tokens,
+                        "INSERT INTO messages (id, session_id, role, content, created_at, effective_at, visible_in_chat, scene_edited, prompt_tokens,
                          completion_tokens, total_tokens, first_token_ms, tokens_per_second, mtp_stats, model_id, selected_variant_id, is_pinned, memory_refs, used_lorebook_entries, attachments, reasoning)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                         params![
                             msg_id,
                             session_id,
-                            msg.get("role").and_then(|v| v.as_str()),
+                            role,
                             msg.get("content").and_then(|v| v.as_str()),
-                            msg.get("created_at").and_then(|v| v.as_i64()),
+                            created_at,
+                            effective_at,
                             msg.get("visible_in_chat").and_then(|v| v.as_bool()).unwrap_or(false) as i64,
                             msg.get("scene_edited").and_then(|v| v.as_bool()).unwrap_or(false) as i64,
                             msg.get("prompt_tokens").and_then(|v| v.as_i64()),
@@ -2653,6 +2670,10 @@ fn import_sessions(app: &tauri::AppHandle, data: &JsonValue) -> Result<(), Strin
 
 fn import_companion_shared_memory(app: &tauri::AppHandle, data: &JsonValue) -> Result<(), String> {
     let mut conn = open_db(app)?;
+    conn.execute("DELETE FROM companion_episodes", [])
+        .map_err(|e| crate::utils::err_to_string(module_path!(), line!(), e))?;
+    conn.execute("DELETE FROM companion_soul_facts", [])
+        .map_err(|e| crate::utils::err_to_string(module_path!(), line!(), e))?;
     conn.execute("DELETE FROM companion_shared_memory_state", [])
         .map_err(|e| crate::utils::err_to_string(module_path!(), line!(), e))?;
     conn.execute(
@@ -2666,17 +2687,25 @@ fn import_companion_shared_memory(app: &tauri::AppHandle, data: &JsonValue) -> R
     };
 
     for item in arr {
+        let character_id = item
+            .get("character_id")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default();
+        let soul_growth = item
+            .get("soul_growth")
+            .and_then(|value| value.as_str())
+            .unwrap_or("[]");
         conn.execute(
             r#"
             INSERT INTO companion_shared_memory_state (
                 character_id, memories, memory_summary, memory_summary_token_count,
                 memory_tool_events, memory_status, memory_error, memory_progress_step,
-                created_at, updated_at
+                soul_growth, relationship_states, created_at, updated_at
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
             "#,
             params![
-                item.get("character_id").and_then(|v| v.as_str()),
+                character_id,
                 item.get("memories")
                     .and_then(|v| v.as_str())
                     .unwrap_or("[]"),
@@ -2690,6 +2719,10 @@ fn import_companion_shared_memory(app: &tauri::AppHandle, data: &JsonValue) -> R
                 item.get("memory_status").and_then(|v| v.as_str()),
                 item.get("memory_error").and_then(|v| v.as_str()),
                 item.get("memory_progress_step").and_then(|v| v.as_i64()),
+                soul_growth,
+                item.get("relationship_states")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("{}"),
                 item.get("created_at").and_then(|v| v.as_i64()),
                 item.get("updated_at").and_then(|v| v.as_i64()),
             ],
@@ -2702,11 +2735,57 @@ fn import_companion_shared_memory(app: &tauri::AppHandle, data: &JsonValue) -> R
             )
         })?;
 
+        crate::storage_manager::companion_shared_memory::sync_normalized_soul_facts(
+            &conn,
+            character_id,
+            soul_growth,
+        )?;
+
+        if let Some(episodes) = item.get("episodes").and_then(JsonValue::as_array) {
+            for episode in episodes {
+                conn.execute(
+                    "INSERT OR REPLACE INTO companion_episodes (
+                       session_id, character_id, persona_key, episode_index,
+                       previous_session_id, started_at, ended_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    params![
+                        episode.get("session_id").and_then(JsonValue::as_str),
+                        character_id,
+                        episode
+                            .get("persona_key")
+                            .and_then(JsonValue::as_str)
+                            .unwrap_or("__default__"),
+                        episode
+                            .get("episode_index")
+                            .and_then(JsonValue::as_i64)
+                            .unwrap_or(1),
+                        episode
+                            .get("previous_session_id")
+                            .and_then(JsonValue::as_str),
+                        episode
+                            .get("started_at")
+                            .and_then(JsonValue::as_i64)
+                            .unwrap_or(0),
+                        episode.get("ended_at").and_then(JsonValue::as_i64),
+                        episode
+                            .get("updated_at")
+                            .and_then(JsonValue::as_i64)
+                            .unwrap_or(0),
+                    ],
+                )
+                .map_err(|error| {
+                    crate::utils::err_msg(
+                        module_path!(),
+                        line!(),
+                        format!("Failed to insert companion episode: {error}"),
+                    )
+                })?;
+            }
+        }
+
         crate::storage_manager::memory_embeddings::replace_all_from_json(
             &mut conn,
-            item.get("character_id")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default(),
+            character_id,
             crate::storage_manager::memory_embeddings::SessionKind::CompanionShared,
             item.get("memory_embeddings").and_then(|v| v.as_str()),
         )?;

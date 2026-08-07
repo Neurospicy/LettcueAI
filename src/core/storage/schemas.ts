@@ -129,6 +129,8 @@ export type PromptEntryCondition =
   | { type: "chatMode"; value: PromptEntryChatMode }
   | { type: "sceneGenerationEnabled"; value: boolean }
   | { type: "avatarGenerationEnabled"; value: boolean }
+  | { type: "isLocalImageGenerationModel"; value: boolean }
+  | { type: "isSceneGenerationLocalImageModel"; value: boolean }
   | { type: "hasScene"; value: boolean }
   | { type: "hasSceneDirection"; value: boolean }
   | { type: "hasPersona"; value: boolean }
@@ -167,6 +169,8 @@ export const PromptEntryConditionSchema: z.ZodType<PromptEntryCondition> = z.laz
     z.object({ type: z.literal("chatMode"), value: PromptEntryChatModeSchema }),
     z.object({ type: z.literal("sceneGenerationEnabled"), value: z.boolean() }),
     z.object({ type: z.literal("avatarGenerationEnabled"), value: z.boolean() }),
+    z.object({ type: z.literal("isLocalImageGenerationModel"), value: z.boolean() }),
+    z.object({ type: z.literal("isSceneGenerationLocalImageModel"), value: z.boolean() }),
     z.object({ type: z.literal("hasScene"), value: z.boolean() }),
     z.object({ type: z.literal("hasSceneDirection"), value: z.boolean() }),
     z.object({ type: z.literal("hasPersona"), value: z.boolean() }),
@@ -495,15 +499,67 @@ export const AdvancedModelSettingsSchema = z.object({
   topK: z.number().int().min(1).max(500).nullable().optional(),
   // Stable Diffusion / AUTOMATIC1111 specific settings
   sdSteps: z.number().int().min(1).max(150).nullable().optional(),
-  sdCfgScale: z.number().min(1).max(30).nullable().optional(),
+  sdCfgScale: z.number().min(0).max(30).nullable().optional(),
   sdSampler: z.string().trim().min(1).nullable().optional(),
+  sdScheduler: z.string().trim().min(1).nullable().optional(),
   sdSeed: z.number().int().min(0).max(2_147_483_647).nullable().optional(),
   sdNegativePrompt: z.string().trim().min(1).nullable().optional(),
   sdDenoisingStrength: z.number().min(0).max(1).nullable().optional(),
+  sdImageCfgScale: z.number().min(0).max(30).nullable().optional(),
+  sdDistilledGuidance: z.number().min(0).max(30).nullable().optional(),
+  sdSlgScale: z.number().min(0).max(30).nullable().optional(),
+  sdSlgLayers: z.string().trim().min(1).nullable().optional(),
+  sdSlgLayerStart: z.number().min(0).max(1).nullable().optional(),
+  sdSlgLayerEnd: z.number().min(0).max(1).nullable().optional(),
+  sdCacheMode: z
+    .enum(["disabled", "easycache", "ucache", "dbcache", "taylorseer", "cache-dit", "spectrum"])
+    .nullable()
+    .optional(),
+  sdCacheOption: z.string().trim().min(1).nullable().optional(),
+  sdEta: z.number().min(0).max(10).nullable().optional(),
+  sdFlowShift: z.number().min(-100).max(100).nullable().optional(),
   sdSize: z.string().trim().min(3).nullable().optional(),
+  sdVaeTilingEnabled: z.boolean().nullable().optional(),
+  sdVaeTileSizeX: z.number().int().min(1).max(8192).nullable().optional(),
+  sdVaeTileSizeY: z.number().int().min(1).max(8192).nullable().optional(),
+  sdVaeTileOverlap: z.number().min(0).max(1).nullable().optional(),
+  sdAutoResizeRefImages: z.boolean().nullable().optional(),
+  sdIncreaseRefIndex: z.boolean().nullable().optional(),
+  sdHiresEnabled: z.boolean().nullable().optional(),
+  sdHiresUpscaler: z.string().trim().min(1).nullable().optional(),
+  sdHiresScale: z.number().min(1).max(8).nullable().optional(),
+  sdHiresWidth: z.number().int().min(0).max(16384).nullable().optional(),
+  sdHiresHeight: z.number().int().min(0).max(16384).nullable().optional(),
+  sdHiresSteps: z.number().int().min(0).max(150).nullable().optional(),
+  sdHiresDenoisingStrength: z.number().min(0.01).max(1).nullable().optional(),
   sdOffloadMode: z.enum(["auto", "gpu", "mixed"]).nullable().optional(),
   sdExtraPrompt: z.string().trim().min(1).nullable().optional(),
   sdPromptWriterInstructions: z.string().trim().min(1).nullable().optional(),
+  sdBaseLoras: z
+    .array(
+      z.object({
+        path: z.string().trim().min(1),
+        multiplier: z.number().min(0).max(2),
+        isHighNoise: z.boolean().optional(),
+        keywords: z.array(z.string().trim().min(1)).optional(),
+      }),
+    )
+    .nullable()
+    .optional(),
+  sdcppProfileId: z.string().trim().min(1).nullable().optional(),
+  sdcppVariantId: z.string().trim().min(1).nullable().optional(),
+  sdcppTextEncoderPath: z.string().trim().min(1).nullable().optional(),
+  sdcppVaePath: z.string().trim().min(1).nullable().optional(),
+  sdcppVisionEncoderPath: z.string().trim().min(1).nullable().optional(),
+  sdcppRuntimeRelease: z.string().trim().min(1).nullable().optional(),
+  sdcppRuntimeAsset: z.string().trim().min(1).nullable().optional(),
+  sdcppRuntimeBackend: z.string().trim().min(1).nullable().optional(),
+  sdcppMaxReferenceImages: z.number().int().min(0).nullable().optional(),
+  sdcppSupportsLora: z.boolean().nullable().optional(),
+  sdcppSupportsTextToImage: z.boolean().nullable().optional(),
+  sdcppSupportsImageEdit: z.boolean().nullable().optional(),
+  sdcppRecommendedForScenes: z.boolean().nullable().optional(),
+  sdcppRequiresReferenceImage: z.boolean().nullable().optional(),
   // llama.cpp specific settings
   llamaGpuLayers: z.number().int().min(0).max(512).nullable().optional(),
   llamaMultiGpuEnabled: z.boolean().nullable().optional(),
@@ -906,6 +962,46 @@ export function getOpenRouterModelReasoningCapability(
  * Documents which advanced parameters are supported by each LLM provider
  */
 export const PROVIDER_PARAMETER_SUPPORT = {
+  sdcpp: {
+    providerId: "sdcpp",
+    displayName: "stable-diffusion.cpp",
+    reasoningSupport: "none" as ReasoningSupport,
+    supportedParameters: {
+      sdSteps: true,
+      sdCfgScale: true,
+      sdSampler: true,
+      sdScheduler: true,
+      sdSeed: true,
+      sdNegativePrompt: true,
+      sdDenoisingStrength: true,
+      sdImageCfgScale: true,
+      sdDistilledGuidance: true,
+      sdEta: true,
+      sdFlowShift: true,
+      sdSlgScale: true,
+      sdSlgLayers: true,
+      sdSlgLayerStart: true,
+      sdSlgLayerEnd: true,
+      sdCacheMode: true,
+      sdCacheOption: true,
+      sdSize: true,
+      sdVaeTilingEnabled: true,
+      sdVaeTileSizeX: true,
+      sdVaeTileSizeY: true,
+      sdVaeTileOverlap: true,
+      sdAutoResizeRefImages: true,
+      sdIncreaseRefIndex: true,
+      sdHiresEnabled: true,
+      sdHiresUpscaler: true,
+      sdHiresScale: true,
+      sdHiresWidth: true,
+      sdHiresHeight: true,
+      sdHiresSteps: true,
+      sdHiresDenoisingStrength: true,
+      sdExtraPrompt: true,
+      sdBaseLoras: true,
+    },
+  },
   automatic1111: {
     providerId: "automatic1111",
     displayName: "AUTOMATIC1111",
@@ -2481,6 +2577,8 @@ export const MessageSchema = z.object({
   role: z.enum(["system", "user", "assistant", "scene"]),
   content: z.string(),
   createdAt: z.number().int(),
+  /** Immutable time in the companion clock frame when this message occurred. */
+  effectiveAt: z.number().int().nullish(),
   /** Opt-in visibility for system messages that should render in chat UI. */
   visibleInChat: z.boolean().optional(),
   /** Session-only override for scene messages so reloads do not snap back to the character scene. */
@@ -2945,6 +3043,46 @@ export const AccessibilitySoundSchema = z.object({
 });
 export type AccessibilitySound = z.infer<typeof AccessibilitySoundSchema>;
 
+export const NavigationStyleSchema = z.enum([
+  "bottom",
+  "bottomLabels",
+  "dock",
+  "sidebar",
+  "floatingSidebar",
+  "header",
+]);
+export type NavigationStyle = z.infer<typeof NavigationStyleSchema>;
+
+export const NavigationSideSchema = z.enum(["left", "right"]);
+export type NavigationSide = z.infer<typeof NavigationSideSchema>;
+
+export const HeaderStyleSchema = z.enum(["auto", "attached", "floating", "inline"]);
+export type HeaderStyle = z.infer<typeof HeaderStyleSchema>;
+
+export const NavAlignSchema = z.enum(["start", "center", "end"]);
+export type NavAlign = z.infer<typeof NavAlignSchema>;
+
+export const NavEdgeSchema = z.enum(["top", "bottom"]);
+export type NavEdge = z.infer<typeof NavEdgeSchema>;
+
+export const NavItemIdSchema = z.enum([
+  "chats",
+  "groups",
+  "create",
+  "discover",
+  "library",
+  "search",
+  "settings",
+]);
+export type NavItemId = z.infer<typeof NavItemIdSchema>;
+export const DEFAULT_NAV_ITEMS: readonly NavItemId[] = [
+  "chats",
+  "groups",
+  "create",
+  "discover",
+  "library",
+];
+
 export const AccessibilitySettingsSchema = z.object({
   send: AccessibilitySoundSchema.default({ enabled: false, volume: 0.5 }),
   success: AccessibilitySoundSchema.default({ enabled: false, volume: 0.6 }),
@@ -3261,6 +3399,12 @@ export const SettingsSchema = z.object({
       dynamicMemory: DynamicMemorySettingsSchema.optional(),
       groupDynamicMemory: DynamicMemorySettingsSchema.optional(),
       accessibility: AccessibilitySettingsSchema.optional(),
+      navigationStyle: NavigationStyleSchema.optional(),
+      navigationSide: NavigationSideSchema.optional(),
+      headerStyle: HeaderStyleSchema.optional(),
+      navItems: z.array(NavItemIdSchema).min(1).max(7).optional(),
+      navAlign: NavAlignSchema.optional(),
+      navEdge: NavEdgeSchema.optional(),
       chatAppearance: ChatAppearanceSettingsSchema.optional(),
       voicePlaybackRules: z.array(VoicePlaybackRuleSchema).optional(),
     })
@@ -3449,7 +3593,7 @@ export const CompanionMemoryConfigSchema = z.object({
   prioritizeRelationship: z.boolean().default(true),
   prioritizeEpisodic: z.boolean().default(true),
   useEmotionalSnapshots: z.boolean().default(true),
-  sharedAcrossSessions: z.boolean().default(false),
+  sharedAcrossSessions: z.boolean().default(true),
 });
 export type CompanionMemoryConfig = z.infer<typeof CompanionMemoryConfigSchema>;
 
@@ -3521,6 +3665,29 @@ export const CompanionConfigSchema = z.object({
       pride: 0.3,
     },
   }),
+  authoredFacts: z
+    .array(
+      z.object({
+        id: z.string(),
+        category: z.string(),
+        value: z.string(),
+        kind: z.string().default("authored"),
+        policy: z.enum(["current", "adaptive", "historical"]),
+        slot: z.string(),
+        confidence: z.number().min(0).max(1).default(1),
+        evidenceCount: z.number().int().nonnegative().default(1),
+        weight: z.number().min(0).max(1).default(1),
+        validFrom: z.number().int().nonnegative().default(0),
+        validUntil: z.number().int().nonnegative().nullish(),
+        locked: z.boolean().default(false),
+        sourceMemoryIds: z.array(z.string()).default([]),
+        createdAt: z.number().int().nonnegative().default(0),
+        supersedes: z.array(z.string()).optional(),
+        supersededBy: z.string().nullish(),
+        supersededAt: z.number().int().nullish(),
+      }),
+    )
+    .default([]),
   relationshipDefaults: CompanionRelationshipDefaultsSchema.default({
     closeness: 0.2,
     trust: 0.3,
@@ -3534,7 +3701,7 @@ export const CompanionConfigSchema = z.object({
     prioritizeRelationship: true,
     prioritizeEpisodic: true,
     useEmotionalSnapshots: true,
-    sharedAcrossSessions: false,
+    sharedAcrossSessions: true,
   }),
   prompting: CompanionPromptingConfigSchema.default({
     promptTemplateId: null,
@@ -3632,6 +3799,14 @@ export const CompanionSoulGrowthEntrySchema = z.object({
   category: z.string().default(""),
   value: z.string().default(""),
   kind: z.string().default("add"),
+  policy: z.enum(["current", "adaptive", "historical"]).default("adaptive"),
+  slot: z.string().default(""),
+  confidence: z.number().min(0).max(1).default(1),
+  evidenceCount: z.number().int().nonnegative().default(0),
+  weight: z.number().min(0).max(1).default(1),
+  validFrom: z.number().int().nonnegative().default(0),
+  validUntil: z.number().int().nonnegative().nullish(),
+  locked: z.boolean().default(false),
   sourceMemoryIds: z.array(z.string()).default([]),
   createdAt: z.number().int().default(0),
   supersedes: z.array(z.string()).optional(),
@@ -3645,6 +3820,14 @@ export const CompanionSessionStateSchema = z.object({
   relationshipState: CompanionRelationshipStateSchema.default(DEFAULT_COMPANION_RELATIONSHIP_STATE),
   activeSignals: z.array(z.string()).default([]),
   soulGrowth: z.array(CompanionSoulGrowthEntrySchema).optional(),
+  continuity: z
+    .object({
+      episodeId: z.string().default(""),
+      episodeIndex: z.number().int().nonnegative().default(0),
+      previousEpisodeId: z.string().nullish(),
+      startedAt: z.number().int().nonnegative().default(0),
+    })
+    .optional(),
   preferences: z
     .object({
       timeAwarenessEnabled: z.boolean().default(false),
@@ -3874,10 +4057,34 @@ export function createDefaultAdvancedModelSettings(): AdvancedModelSettings {
     sdSteps: null,
     sdCfgScale: null,
     sdSampler: null,
+    sdScheduler: null,
     sdSeed: null,
     sdNegativePrompt: null,
     sdDenoisingStrength: null,
+    sdImageCfgScale: null,
+    sdDistilledGuidance: null,
+    sdEta: null,
+    sdFlowShift: null,
+    sdSlgScale: null,
+    sdSlgLayers: null,
+    sdSlgLayerStart: null,
+    sdSlgLayerEnd: null,
+    sdCacheMode: null,
+    sdCacheOption: null,
     sdSize: null,
+    sdVaeTilingEnabled: null,
+    sdVaeTileSizeX: null,
+    sdVaeTileSizeY: null,
+    sdVaeTileOverlap: null,
+    sdAutoResizeRefImages: null,
+    sdIncreaseRefIndex: null,
+    sdHiresEnabled: null,
+    sdHiresUpscaler: null,
+    sdHiresScale: null,
+    sdHiresWidth: null,
+    sdHiresHeight: null,
+    sdHiresSteps: null,
+    sdHiresDenoisingStrength: null,
     sdOffloadMode: null,
     sdExtraPrompt: null,
     sdPromptWriterInstructions: null,
