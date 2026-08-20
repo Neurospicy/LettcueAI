@@ -107,6 +107,7 @@ export const enMessages = {
       install: "Install",
       remove: "Remove",
       rename: "Rename",
+      duplicate: "Duplicate",
       copy: "Copy",
       copied: "Copied!",
       browseFiles: "Browse Files",
@@ -2175,6 +2176,25 @@ export const enMessages = {
       useGroupDefault: "Use group default",
       participantsOverridden: "Participants changed for this chat",
       mutedOverridden: "Muted participants changed for this chat",
+      participantsAndMutedOverridden: "Participants and mutes changed for this chat",
+    },
+    modelOverrides: {
+      title: "Character models",
+      subtitle: "Pick a different model for a single character",
+      loading: "Loading models...",
+      overrideBadge: "Override",
+      selectFor: "Model for {name}",
+      useCharacterDefault: "Use the character's model",
+      inheritedValue: "{{model}} (character default)",
+      missingModel: "Selected model is missing",
+      noModel: "No model configured",
+    },
+    promptOverride: {
+      title: "Group system prompt",
+      conversationSubtitle: "Applied to every reply in this conversation group",
+      roleplaySubtitle: "Applied to every reply in this roleplay group",
+      useCharacterDefault: "Use each character's prompt",
+      hint: "Overrides the group prompt each character would use on their own.",
     },
     memories: {
       tabMemories: "Memories",
@@ -2385,7 +2405,7 @@ export const enMessages = {
       removeCharacter: "Remove character",
       groupMinCharacters: "A group requires at least 2 characters",
       mutedCharactersNote:
-        "Muted characters are skipped by auto speaker selection, but can still respond via explicit `@mention`.",
+        "Muted characters are skipped by auto speaker selection, but can still respond via explicit @mention.",
       addCharacterTitle: "Add Character",
       allCharactersInGroup: "All characters are already in this group.",
       removeCharacterTitle: "Remove Character?",
@@ -2458,7 +2478,7 @@ export const enMessages = {
       removeCharacter: "Remove character",
       groupMinCharacters: "A group chat requires at least 2 characters",
       mutedCharactersNote:
-        "Muted characters are skipped by auto speaker selection, but can still respond via explicit `@mention`.",
+        "Muted characters are skipped by auto speaker selection, but can still respond via explicit @mention.",
       data: "Data",
       dataSubtitle: "Export or import conversations",
       export: "Export",
@@ -4167,12 +4187,14 @@ export const enMessages = {
       audio: "Audio",
       model: "Model",
     },
+    duplicateSuffix: "{{name}} (Copy)",
     menu: {
       editDescription: "Configure model parameters",
       alreadyDefault: "Already Default",
       setAsDefault: "Set as Default",
       setAsDefaultDescription: "Make this your primary model",
       exportDescription: "Save this model profile",
+      duplicateDescription: "Create a copy of this model",
       deleteTitle: "Delete model?",
       deleteMessage: "Are you sure you want to delete {{name}}?",
       deleteDescription: "Remove this model permanently",
@@ -4182,6 +4204,9 @@ export const enMessages = {
       importSuccessTitle: "Imported successfully",
       importSuccessDescription: 'Model "{{name}}" was imported.',
       importFailed: "Import failed",
+      duplicateSuccessTitle: "Model duplicated",
+      duplicateSuccessDescription: 'Created "{{name}}".',
+      duplicateFailed: "Duplicate failed",
     },
     downloadQueue: {
       kokoroAsset: "Kokoro asset",
@@ -4529,6 +4554,7 @@ export const enMessages = {
       componentsRequiredTitle: "Model files missing",
       componentsRequiredBody: "Fill in the highlighted component files before saving.",
       componentFilesFilter: "Model component files",
+      modelFilesFilter: "Diffusion model files",
       chooseFromLibrary: "Choose from Library",
       componentPickerTitle: "Select Component File",
       componentLibraryEmpty: "No matching files in your library",
@@ -4756,6 +4782,14 @@ export const enMessages = {
     },
     moveModel: {
       title: "Move Model File",
+      moveAllTitle: "Store Files in Library",
+      moveAllDescription:
+        "Move this model and its draft and vision files into the LettuceAI GGUF library folder.",
+      moveAllAction: "Move to library",
+      moveAllMoving: "Moving files...",
+      moveAllDone: "All files are in the library",
+      movedAllTitle: "Files moved",
+      movedAllBody: "This model and its sidecar files now live in the GGUF library.",
     },
     parameterSupport: {
       title: "Parameter Support",
@@ -4937,6 +4971,11 @@ export const enMessages = {
         "Recent tokens used by repeat, frequency, and presence penalties; `-1` uses the full context",
       xtcProbability: "XTC Probability",
       xtcThreshold: "XTC Threshold",
+      adaptiveTarget: "Adaptive-P Target",
+      adaptiveTargetDescription:
+        "Target probability for Adaptive-P; leave empty to keep the standard final sampling step",
+      adaptiveDecay: "Adaptive-P Target Decay",
+      adaptiveDecayDescription: "Lower reacts faster to recent tokens, higher stays steadier",
       localOverride: "Local override",
       dryMultiplier: "DRY Multiplier",
       dryMultiplierDescription: "`0` disables sequence repetition control",
@@ -4968,6 +5007,28 @@ export const enMessages = {
       draftFile: "MTP Draft File",
       draftFileDescription:
         "Optional external draft GGUF. Auto-discovered from a sibling mtp-*.gguf when empty.",
+      draftFilePlaceholder: "Auto-discover",
+    },
+    dflash: {
+      title: "DFlash Speculative Decoding",
+      description:
+        "Drafts a whole block of tokens per step using a DFlash draft file. Takes priority over MTP when a draft file is available.",
+      toggle: "Toggle DFlash speculative decoding",
+      visionWarningTitle: "DFlash is unavailable for vision",
+      visionWarningDescription:
+        "Image requests will continue without DFlash while an MMProj vision file is configured.",
+      placement: "Draft Model Placement",
+      placementDescription: "Auto keeps the draft model on the fastest GPU that has room",
+      placementGpu: "GPU",
+      placementCpu: "CPU",
+      draftTokens: "Draft Tokens",
+      draftTokensDescription:
+        "Tokens drafted per block, capped by the draft file's trained block size (1 to 15)",
+      minProbability: "Minimum Confidence",
+      minProbabilityDescription: "Drafting stops at the first token below this confidence (0 to 1)",
+      draftFile: "DFlash Draft File",
+      draftFileDescription:
+        "DFlash draft GGUF trained for this model. Auto-discovered from a sibling *dflash*.gguf when empty.",
       draftFilePlaceholder: "Auto-discover",
     },
     templates: {
@@ -5273,6 +5334,11 @@ export const enMessages = {
       verifiedInstaller: "Verified bundle installer",
       chooseArchitecture: "Choose an architecture recipe",
       changeArchitecture: "Change architecture",
+      formatLabel: "Format",
+      formatGguf: "GGUF",
+      formatSafetensors: "Safetensors",
+      formatHint:
+        "Search repositories published in this format. Safetensors reaches the many image repositories that never ship a GGUF build.",
       changeProfileConfirm: "Changing architecture clears incompatible component selections. Continue?",
       componentStep: "Component {{current}} of {{total}}",
       selectRole: "Select {{role}}",
@@ -9397,6 +9463,10 @@ export const enMessages = {
       xtcProbabilityDesc: "Chance of excluding top tokens (0 = off). Boosts variety.",
       xtcThreshold: "XTC Threshold",
       xtcThresholdDesc: "Min probability a token needs to be eligible for XTC removal.",
+      adaptiveTarget: "Adaptive-P Target",
+      adaptiveTargetDesc: "Aim for tokens near this probability. Empty keeps normal sampling.",
+      adaptiveDecay: "Adaptive-P Target Decay",
+      adaptiveDecayDesc: "How steady the target adaptation is. Lower reacts faster.",
       seed: "Seed",
       seedDesc: "Random seed. Leave blank for random.",
       ropeBase: "RoPE Base",
@@ -9554,6 +9624,8 @@ export const enMessages = {
     penaltyRange: "Penalty Range",
     xtcProbability: "XTC Probability",
     xtcThreshold: "XTC Threshold",
+    adaptiveTarget: "Adaptive-P Target",
+    adaptiveDecay: "Adaptive-P Target Decay",
     dryMultiplier: "DRY Multiplier",
     dryBase: "DRY Base",
     dryAllowedLength: "DRY Allowed Length",
@@ -9637,6 +9709,10 @@ export const enMessages = {
       temp: {
         label: "Temperature",
         desc: "Flatten or sharpen the final distribution before selection.",
+      },
+      adaptiveP: {
+        label: "Adaptive-P",
+        desc: "Picks tokens near a target probability and adapts over time. Always runs last, and only when its target is set.",
       },
       dry: {
         label: "DRY",

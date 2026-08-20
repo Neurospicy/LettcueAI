@@ -27,7 +27,14 @@ import { useNavigationManager, Routes } from "../../navigation";
 import { useAvatar } from "../../hooks/useAvatar";
 import { AvatarImage } from "../../components/AvatarImage";
 import { useGroupSettingsController } from "./hooks/useGroupSettingsController";
-import { CharacterAvatar, PersonaSelector, QuickChip, SectionHeader } from "./components/settings";
+import {
+  CharacterAvatar,
+  GroupCharacterModelsSection,
+  GroupPromptTemplateSection,
+  PersonaSelector,
+  QuickChip,
+  SectionHeader,
+} from "./components/settings";
 import { OptionRow } from "./components/OptionRow";
 import { Switch } from "../../components/Switch";
 
@@ -58,6 +65,8 @@ export function GroupSettingsPage() {
     handleSetCharacterMuted,
     handleChangeSpeakerSelectionMethod,
     handleChangeMemoryType,
+    handleChangeCharacterModel,
+    handleChangePromptTemplate,
     handleUpdateBackgroundImage,
     handleSetDisableCharacterLorebooks,
   } = useGroupSettingsController(groupId);
@@ -664,14 +673,40 @@ export function GroupSettingsPage() {
               </AnimatePresence>
             </div>
 
-            {groupCharacters.length <= 2 && (
-              <p className="mt-2 text-xs text-fg/40 text-center">
-                {t("groupChats.groupSettings.groupMinCharacters")}
+            <div className="mt-3 space-y-1.5 px-1">
+              {groupCharacters.length <= 2 && (
+                <p className={cn(typography.caption.size, "text-fg/45")}>
+                  {t("groupChats.groupSettings.groupMinCharacters")}
+                </p>
+              )}
+              <p className={cn(typography.caption.size, "text-fg/45")}>
+                {t("groupChats.groupSettings.mutedCharactersNote")}
               </p>
-            )}
-            <p className="mt-2 text-xs text-fg/40 text-center">
-              {t("groupChats.groupSettings.mutedCharactersNote")}
-            </p>
+            </div>
+          </section>
+
+          <section className={spacing.item}>
+            <GroupCharacterModelsSection
+              characters={groupCharacters}
+              overrides={group.characterModelOverrides ?? {}}
+              onChange={(characterId, modelId) =>
+                void handleChangeCharacterModel(characterId, modelId)
+              }
+              disabled={saving}
+            />
+          </section>
+
+          <section className={spacing.item}>
+            <GroupPromptTemplateSection
+              chatType={group.chatType}
+              templateId={
+                group.chatType === "roleplay"
+                  ? (group.groupChatRoleplayPromptTemplateId ?? null)
+                  : (group.groupChatPromptTemplateId ?? null)
+              }
+              onChange={(templateId) => void handleChangePromptTemplate(templateId)}
+              disabled={saving}
+            />
           </section>
 
           {/* Error banner */}

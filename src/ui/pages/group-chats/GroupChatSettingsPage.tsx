@@ -30,7 +30,14 @@ import { BottomMenu, MenuSection } from "../../components";
 import { Routes, useNavigationManager } from "../../navigation";
 import { useGroupChatSettingsController } from "./hooks/useGroupChatSettingsController";
 import { useGroupChatLayoutContext } from "./GroupChatLayout";
-import { SectionHeader, CharacterAvatar, QuickChip, PersonaSelector } from "./components/settings";
+import {
+  SectionHeader,
+  CharacterAvatar,
+  QuickChip,
+  PersonaSelector,
+  GroupCharacterModelsSection,
+  GroupPromptTemplateSection,
+} from "./components/settings";
 import { OptionRow } from "./components/OptionRow";
 import { GroupAuthorNoteBottomMenu } from "./components";
 import { Switch } from "../../components/Switch";
@@ -139,6 +146,8 @@ export function GroupChatSettingsPage({
     handleAddCharacter,
     handleRemoveCharacter,
     handleChangeSpeakerSelectionMethod,
+    handleChangeCharacterModel,
+    handleChangePromptTemplate,
     handleSetCharacterMuted,
     handleUpdateBackgroundImage,
     handleSetDisableCharacterLorebooks,
@@ -243,6 +252,20 @@ export function GroupChatSettingsPage({
 
   const isOverridden = (key: GroupSessionOverrideKey) =>
     Boolean(session?.groupCharacterId) && !!session && hasGroupSessionOverride(session, key);
+
+  const participantsOverridden = isOverridden("characterIds");
+  const mutedOverridden = isOverridden("mutedCharacterIds");
+  const participantOverrideLabel =
+    participantsOverridden && mutedOverridden
+      ? t("groupChats.overrides.participantsAndMutedOverridden")
+      : participantsOverridden
+        ? t("groupChats.overrides.participantsOverridden")
+        : t("groupChats.overrides.mutedOverridden");
+
+  const resetParticipantOverrides = async () => {
+    if (participantsOverridden) await handleClearOverride("characterIds");
+    if (mutedOverridden) await handleClearOverride("mutedCharacterIds");
+  };
 
   const goToFromSettings = (path: string) => {
     if (isDrawer) onClose?.();
@@ -369,7 +392,7 @@ export function GroupChatSettingsPage({
   };
 
   // Loading state
-  if (sessionLoading || loading) {
+  if ((sessionLoading || loading) && !session) {
     return (
       <div className="flex h-full flex-col text-fg">
         <header className="shrink-0 border-b border-fg/10 px-4 pb-3 pt-10">
@@ -1022,26 +1045,74 @@ export function GroupChatSettingsPage({
               </AnimatePresence>
             </div>
 
-            <OverrideStatusRow
-              show={isOverridden("characterIds")}
-              label={t("groupChats.overrides.participantsOverridden")}
-              onReset={() => void handleClearOverride("characterIds")}
-              disabled={saving}
-            />
-            <OverrideStatusRow
-              show={isOverridden("mutedCharacterIds")}
-              label={t("groupChats.overrides.mutedOverridden")}
-              onReset={() => void handleClearOverride("mutedCharacterIds")}
-              disabled={saving}
-            />
-            {groupCharacters.length <= 2 && (
-              <p className="mt-2 text-xs text-fg/40 text-center">
-                {t("groupChats.sessionSettings.groupMinCharacters")}
-              </p>
+            {(participantsOverridden || mutedOverridden) && (
+              <div className="mt-3 border-t border-fg/8 pt-1.5">
+                <OverrideStatusRow
+                  show
+                  label={participantOverrideLabel}
+                  onReset={() => void resetParticipantOverrides()}
+                  disabled={saving}
+                />
+              </div>
             )}
-            <p className="mt-2 text-xs text-fg/40 text-center">
-              {t("groupChats.sessionSettings.mutedCharactersNote")}
-            </p>
+            <div className="mt-4 space-y-1 px-1">
+              {groupCharacters.length <= 2 && (
+                <p className={cn(typography.caption.size, "leading-snug text-fg/35")}>
+                  {t("groupChats.sessionSettings.groupMinCharacters")}
+                </p>
+              )}
+              <p className={cn(typography.caption.size, "leading-snug text-fg/35")}>
+                {t("groupChats.sessionSettings.mutedCharactersNote")}
+              </p>
+            </div>
+          </section>
+
+          <section className={spacing.item}>
+            <GroupCharacterModelsSection
+              characters={groupCharacters}
+              overrides={session.characterModelOverrides ?? {}}
+              onChange={(characterId, modelId) =>
+                void handleChangeCharacterModel(characterId, modelId)
+              }
+              disabled={saving}
+              footer={
+                <OverrideStatusRow
+                  show={isOverridden("characterModelOverrides")}
+                  onReset={() => void handleClearOverride("characterModelOverrides")}
+                  disabled={saving}
+                />
+              }
+            />
+          </section>
+
+          <section className={spacing.item}>
+            <GroupPromptTemplateSection
+              chatType={session.chatType}
+              templateId={
+                session.chatType === "roleplay"
+                  ? (session.groupChatRoleplayPromptTemplateId ?? null)
+                  : (session.groupChatPromptTemplateId ?? null)
+              }
+              onChange={(templateId) => void handleChangePromptTemplate(templateId)}
+              disabled={saving}
+              footer={
+                <OverrideStatusRow
+                  show={isOverridden(
+                    session.chatType === "roleplay"
+                      ? "groupChatRoleplayPromptTemplateId"
+                      : "groupChatPromptTemplateId",
+                  )}
+                  onReset={() =>
+                    void handleClearOverride(
+                      session.chatType === "roleplay"
+                        ? "groupChatRoleplayPromptTemplateId"
+                        : "groupChatPromptTemplateId",
+                    )
+                  }
+                  disabled={saving}
+                />
+              }
+            />
           </section>
 
           {/* Session Actions */}

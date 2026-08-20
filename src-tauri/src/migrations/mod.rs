@@ -4,10 +4,10 @@ use tauri::AppHandle;
 
 use crate::chat_manager::prompts;
 use crate::storage_manager::settings::{read_settings_typed, write_settings_typed};
-use crate::utils::log_info;
+use crate::utils::{log_info, log_warn};
 
 /// Current migration version
-pub const CURRENT_MIGRATION_VERSION: u32 = 91;
+pub const CURRENT_MIGRATION_VERSION: u32 = 96;
 
 pub fn run_migrations(app: &AppHandle) -> Result<(), String> {
     log_info(app, "migrations", "Starting migration check");
@@ -937,6 +937,67 @@ pub fn run_migrations(app: &AppHandle) -> Result<(), String> {
         );
         migrate_v90_to_v91(app)?;
         version = 91;
+    }
+
+    if version < 92 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v91 -> v92: Repair group chat schema drift",
+        );
+        migrate_v91_to_v92(app)?;
+        version = 92;
+    }
+
+    if version < 93 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v92 -> v93: Add group model and prompt overrides",
+        );
+        migrate_v92_to_v93(app)?;
+        version = 93;
+    }
+
+    if version < 94 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v93 -> v94: Repair group message columns",
+        );
+        migrate_v93_to_v94(app)?;
+        version = 94;
+    }
+
+    if version < 95 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v94 -> v95: Repair group session config overrides",
+        );
+        migrate_v94_to_v95(app)?;
+        version = 95;
+    }
+
+    if version < 96 {
+        log_info(
+            app,
+            "migrations",
+            "Running migration v95 -> v96: Canonicalize table layouts so sync schema fingerprints match across devices",
+        );
+        migrate_v95_to_v96(app)?;
+        version = 96;
+    }
+
+    if version != CURRENT_MIGRATION_VERSION {
+        log_warn(
+            app,
+            "migrations",
+            format!(
+                "Migration chain stopped at {} but the current version is {}; later migrations will be skipped",
+                version, CURRENT_MIGRATION_VERSION
+            ),
+        );
     }
 
     // Update the stored version
@@ -4331,6 +4392,18 @@ pub(crate) fn run_preflight_migrations(
     if version >= 90 && version < 91 {
         migrate_v90_to_v91_conn(conn)?;
     }
+    if version >= 91 && version < 92 {
+        migrate_v91_to_v92_conn(conn)?;
+    }
+    if version >= 92 && version < 93 {
+        migrate_v92_to_v93_conn(conn)?;
+    }
+    if version >= 93 && version < 94 {
+        migrate_v93_to_v94_conn(conn)?;
+    }
+    if version >= 94 && version < 95 {
+        migrate_v94_to_v95_conn(conn)?;
+    }
     Ok(())
 }
 
@@ -4357,6 +4430,235 @@ fn migrate_v89_to_v90(app: &AppHandle) -> Result<(), String> {
 fn migrate_v90_to_v91(app: &AppHandle) -> Result<(), String> {
     let conn = crate::storage_manager::db::open_db(app)?;
     migrate_v90_to_v91_conn(&conn)
+}
+
+fn migrate_v91_to_v92(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_v91_to_v92_conn(&conn)
+}
+
+fn ensure_group_session_config_overrides(
+    conn: &rusqlite::Connection,
+) -> Result<(), String> {
+    let has_config_overrides = conn
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM pragma_table_info('group_sessions')
+               WHERE name = 'config_overrides'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    if !has_config_overrides {
+        conn.execute(
+            "ALTER TABLE group_sessions ADD COLUMN config_overrides TEXT NOT NULL DEFAULT '{\"version\":1}'",
+            [],
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
+    Ok(())
+}
+
+fn migrate_v91_to_v92_conn(conn: &rusqlite::Connection) -> Result<(), String> {
+    ensure_group_session_config_overrides(conn)?;
+    migrate_v87_to_v88_conn(conn)
+}
+
+const GROUP_MESSAGE_COLUMNS: &[(&str, &str)] = &[
+    ("first_token_ms", "INTEGER"),
+    ("tokens_per_second", "REAL"),
+    ("mtp_stats", "TEXT"),
+    ("attachments", "TEXT NOT NULL DEFAULT '[]'"),
+    ("used_lorebook_entries", "TEXT NOT NULL DEFAULT '[]'"),
+    ("memory_refs", "TEXT NOT NULL DEFAULT '[]'"),
+    ("reasoning", "TEXT"),
+    ("selection_reasoning", "TEXT"),
+    ("model_id", "TEXT"),
+    ("gemini_content", "TEXT"),
+    ("usage_json", "TEXT"),
+    ("parent_message_id", "TEXT"),
+];
+
+const GROUP_MESSAGE_VARIANT_COLUMNS: &[(&str, &str)] = &[
+    ("first_token_ms", "INTEGER"),
+    ("tokens_per_second", "REAL"),
+    ("mtp_stats", "TEXT"),
+    ("attachments", "TEXT NOT NULL DEFAULT '[]'"),
+    ("reasoning", "TEXT"),
+    ("selection_reasoning", "TEXT"),
+    ("model_id", "TEXT"),
+    ("gemini_content", "TEXT"),
+    ("usage_json", "TEXT"),
+];
+
+/// Repairs group message columns that were only ever added by best-effort
+/// `ALTER TABLE` calls whose errors were discarded, so a single failed upgrade
+/// left the column missing permanently.
+fn ensure_group_message_columns(conn: &rusqlite::Connection) -> Result<(), String> {
+    for (table, columns) in [
+        ("group_messages", GROUP_MESSAGE_COLUMNS),
+        ("group_message_variants", GROUP_MESSAGE_VARIANT_COLUMNS),
+    ] {
+        add_missing_columns(conn, table, columns)?;
+    }
+    Ok(())
+}
+
+fn add_missing_columns(
+    conn: &rusqlite::Connection,
+    table: &str,
+    columns: &[(&str, &str)],
+) -> Result<(), String> {
+    let table_exists = conn
+        .query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1
+             )",
+            rusqlite::params![table],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    if !table_exists {
+        return Ok(());
+    }
+    for (column, definition) in columns {
+        let exists = conn
+            .query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM pragma_table_info(?1) WHERE name = ?2
+                 )",
+                rusqlite::params![table, column],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        if !exists {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {definition}"),
+                [],
+            )
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        }
+    }
+    Ok(())
+}
+
+const GROUP_OVERRIDE_COLUMNS: &[(&str, &str)] = &[
+    ("character_model_overrides", "TEXT NOT NULL DEFAULT '{}'"),
+    ("group_chat_prompt_template_id", "TEXT"),
+    ("group_chat_roleplay_prompt_template_id", "TEXT"),
+];
+
+fn ensure_group_override_columns(conn: &rusqlite::Connection) -> Result<(), String> {
+    for table in ["group_characters", "group_sessions"] {
+        add_missing_columns(conn, table, GROUP_OVERRIDE_COLUMNS)?;
+    }
+    Ok(())
+}
+
+fn migrate_v92_to_v93(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_v92_to_v93_conn(&conn)
+}
+
+fn migrate_v92_to_v93_conn(conn: &rusqlite::Connection) -> Result<(), String> {
+    ensure_group_override_columns(conn)?;
+    migrate_v87_to_v88_conn(conn)
+}
+
+fn migrate_v93_to_v94(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_v93_to_v94_conn(&conn)
+}
+
+fn migrate_v93_to_v94_conn(conn: &rusqlite::Connection) -> Result<(), String> {
+    ensure_group_message_columns(conn)
+}
+
+fn migrate_v94_to_v95(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    migrate_v94_to_v95_conn(&conn)
+}
+
+fn migrate_v95_to_v96(app: &AppHandle) -> Result<(), String> {
+    let conn = crate::storage_manager::db::open_db(app)?;
+    let report = crate::storage_manager::schema_canonicalizer::canonicalize_schema(&conn)?;
+    if !report.rebuilt.is_empty() {
+        log_info(
+            app,
+            "migrations",
+            format!("Canonicalized tables: {}", report.rebuilt.join(", ")),
+        );
+    }
+    if !report.renamed_legacy.is_empty() {
+        log_info(
+            app,
+            "migrations",
+            format!(
+                "Renamed leftover tables out of the sync catalog: {}",
+                report.renamed_legacy.join(", ")
+            ),
+        );
+    }
+    for warning in &report.warnings {
+        log_warn(app, "migrations", format!("Canonicalization warning: {warning}"));
+    }
+    migrate_sync_v2_schema(&conn)
+}
+
+fn migrate_v94_to_v95_conn(conn: &rusqlite::Connection) -> Result<(), String> {
+    use rusqlite::params;
+
+    let rows = {
+        let mut statement = conn
+            .prepare("SELECT id, config_overrides FROM group_sessions")
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?
+    };
+
+    for (session_id, raw_overrides) in rows {
+        let Some(mut overrides) = serde_json::from_str::<Value>(&raw_overrides)
+            .ok()
+            .and_then(|value| value.as_object().cloned())
+        else {
+            continue;
+        };
+
+        let mut repaired = false;
+
+        if let Some(Value::String(encoded)) = overrides.get("startingScene") {
+            let decoded = serde_json::from_str::<Value>(encoded).unwrap_or(Value::Null);
+            overrides.insert("startingScene".to_string(), decoded);
+            repaired = true;
+        }
+
+        if let Some(Value::Number(flag)) = overrides.get("disableCharacterLorebooks") {
+            let enabled = flag.as_i64().unwrap_or(0) != 0;
+            overrides.insert(
+                "disableCharacterLorebooks".to_string(),
+                serde_json::json!(enabled),
+            );
+            repaired = true;
+        }
+
+        if !repaired {
+            continue;
+        }
+
+        conn.execute(
+            "UPDATE group_sessions SET config_overrides = ?1 WHERE id = ?2",
+            params![Value::Object(overrides).to_string(), session_id],
+        )
+        .map_err(|error| crate::utils::err_to_string(module_path!(), line!(), error))?;
+    }
+
+    Ok(())
 }
 
 fn migrate_v90_to_v91_conn(conn: &rusqlite::Connection) -> Result<(), String> {
@@ -4866,6 +5168,8 @@ const GROUP_SESSIONS_V88_COLUMNS: &[&str] = &[
     "memory_summary_token_count", "memory_tool_events", "memory_status", "memory_error",
     "memory_progress_step", "speaker_selection_method", "memory_type", "config_overrides",
     "parent_session_id", "branched_from_message_id", "root_session_id",
+    "character_model_overrides", "group_chat_prompt_template_id",
+    "group_chat_roleplay_prompt_template_id",
 ];
 
 const IMAGE_LORAS_V88_COLUMNS: &[&str] = &[
@@ -4909,6 +5213,9 @@ fn sync_layouts_are_canonical(conn: &rusqlite::Connection) -> Result<bool, Strin
 }
 
 fn migrate_v87_to_v88_conn(conn: &rusqlite::Connection) -> Result<(), String> {
+    ensure_group_session_config_overrides(conn)?;
+    ensure_group_override_columns(conn)?;
+
     let migration_recorded = conn
         .query_row(
             "SELECT EXISTS(
@@ -4969,6 +5276,9 @@ fn migrate_v87_to_v88_conn(conn: &rusqlite::Connection) -> Result<(), String> {
                   parent_session_id TEXT,
                   branched_from_message_id TEXT,
                   root_session_id TEXT,
+                  character_model_overrides TEXT NOT NULL DEFAULT '{}',
+                  group_chat_prompt_template_id TEXT,
+                  group_chat_roleplay_prompt_template_id TEXT,
                   FOREIGN KEY(persona_id) REFERENCES personas(id) ON DELETE SET NULL,
                   FOREIGN KEY(group_character_id) REFERENCES group_characters(id) ON DELETE SET NULL
                 );
@@ -4980,7 +5290,9 @@ fn migrate_v87_to_v88_conn(conn: &rusqlite::Connection) -> Result<(), String> {
                   memory_summary, memory_summary_token_count, memory_tool_events,
                   memory_status, memory_error, memory_progress_step,
                   speaker_selection_method, memory_type, config_overrides,
-                  parent_session_id, branched_from_message_id, root_session_id
+                  parent_session_id, branched_from_message_id, root_session_id,
+                  character_model_overrides, group_chat_prompt_template_id,
+                  group_chat_roleplay_prompt_template_id
                 )
                 SELECT
                   id, group_character_id, name, character_ids, muted_character_ids,
@@ -4990,7 +5302,9 @@ fn migrate_v87_to_v88_conn(conn: &rusqlite::Connection) -> Result<(), String> {
                   memory_summary, memory_summary_token_count, memory_tool_events,
                   memory_status, memory_error, memory_progress_step,
                   speaker_selection_method, memory_type, config_overrides,
-                  parent_session_id, branched_from_message_id, root_session_id
+                  parent_session_id, branched_from_message_id, root_session_id,
+                  character_model_overrides, group_chat_prompt_template_id,
+                  group_chat_roleplay_prompt_template_id
                 FROM group_sessions;
                 DROP TABLE group_sessions;
                 ALTER TABLE group_sessions_v88 RENAME TO group_sessions;
@@ -5250,7 +5564,16 @@ fn migrate_v77_to_v78(app: &AppHandle) -> Result<(), String> {
         }
         add_override!("personaId", session.3, profile.2);
         add_override!("chatType", session.4, profile.3);
-        add_override!("startingScene", session.5, profile.4);
+        if session.5 != profile.4 {
+            overrides.insert(
+                "startingScene".to_string(),
+                session
+                    .5
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                    .unwrap_or(Value::Null),
+            );
+        }
         add_override!("backgroundImagePath", session.6, profile.5);
         if session.7 != profile.6 {
             overrides.insert(
@@ -5258,7 +5581,12 @@ fn migrate_v77_to_v78(app: &AppHandle) -> Result<(), String> {
                 serde_json::from_str(&session.7).unwrap_or_else(|_| serde_json::json!([])),
             );
         }
-        add_override!("disableCharacterLorebooks", session.8, profile.7);
+        if session.8 != profile.7 {
+            overrides.insert(
+                "disableCharacterLorebooks".to_string(),
+                serde_json::json!(session.8 != 0),
+            );
+        }
         add_override!("speakerSelectionMethod", session.9, profile.8);
         add_override!("memoryType", session.10, profile.9);
         conn.execute(
@@ -5387,13 +5715,89 @@ fn migrate_v71_to_v72(app: &AppHandle) -> Result<(), String> {
 mod tests {
     use super::{
         migrate_image_lora_metadata_columns, migrate_sync_v2_schema,
-        migrate_v87_to_v88_conn, migrate_v88_to_v89_conn, migrate_v89_to_v90_conn,
-        migrate_v90_to_v91_conn,
+        migrate_v88_to_v89_conn, migrate_v89_to_v90_conn,
+        migrate_v90_to_v91_conn, migrate_v94_to_v95_conn,
         run_preflight_migrations,
         table_column_names,
-        GROUP_SESSIONS_V88_COLUMNS, IMAGE_LORAS_V88_COLUMNS,
-        LOREBOOK_ENTRIES_V88_COLUMNS,
+        GROUP_MESSAGE_COLUMNS, GROUP_MESSAGE_VARIANT_COLUMNS, GROUP_SESSIONS_V88_COLUMNS,
+        IMAGE_LORAS_V88_COLUMNS, LOREBOOK_ENTRIES_V88_COLUMNS,
     };
+
+    #[test]
+    fn v95_decodes_double_encoded_group_session_overrides() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE group_sessions (
+              id TEXT PRIMARY KEY,
+              config_overrides TEXT NOT NULL DEFAULT '{"version":1}'
+            );
+            INSERT INTO group_sessions (id, config_overrides) VALUES (
+              'broken',
+              '{"version":1,"startingScene":"{\"id\":\"11111111-1111-4111-8111-111111111111\",\"content\":\"A quiet room\",\"createdAt\":10}","disableCharacterLorebooks":1}'
+            );
+            INSERT INTO group_sessions (id, config_overrides) VALUES (
+              'healthy',
+              '{"version":1,"startingScene":{"id":"22222222-2222-4222-8222-222222222222","content":"Already fine","createdAt":20},"disableCharacterLorebooks":false}'
+            );
+            INSERT INTO group_sessions (id, config_overrides) VALUES ('empty', '{"version":1}');
+            "#,
+        )
+        .unwrap();
+
+        migrate_v94_to_v95_conn(&conn).unwrap();
+
+        let overrides = |id: &str| -> serde_json::Value {
+            let raw: String = conn
+                .query_row(
+                    "SELECT config_overrides FROM group_sessions WHERE id = ?1",
+                    rusqlite::params![id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            serde_json::from_str(&raw).unwrap()
+        };
+
+        let repaired = overrides("broken");
+        assert_eq!(repaired["startingScene"]["content"], "A quiet room");
+        assert_eq!(repaired["disableCharacterLorebooks"], serde_json::json!(true));
+
+        let healthy = overrides("healthy");
+        assert_eq!(healthy["startingScene"]["content"], "Already fine");
+        assert_eq!(healthy["disableCharacterLorebooks"], serde_json::json!(false));
+
+        assert_eq!(overrides("empty"), serde_json::json!({"version": 1}));
+    }
+
+    #[test]
+    fn v95_clears_group_session_scenes_that_cannot_be_decoded() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE group_sessions (
+              id TEXT PRIMARY KEY,
+              config_overrides TEXT NOT NULL DEFAULT '{"version":1}'
+            );
+            INSERT INTO group_sessions (id, config_overrides) VALUES (
+              'legacy',
+              '{"version":1,"startingScene":"a plain sentence, not json"}'
+            );
+            "#,
+        )
+        .unwrap();
+
+        migrate_v94_to_v95_conn(&conn).unwrap();
+
+        let raw: String = conn
+            .query_row(
+                "SELECT config_overrides FROM group_sessions WHERE id = 'legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let repaired: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(repaired["startingScene"], serde_json::Value::Null);
+    }
 
     #[test]
     fn v89_backfills_latest_soul_growth_and_persona_relationships() {
@@ -5828,13 +6232,13 @@ mod tests {
     }
 
     #[test]
-    fn v88_canonicalizes_upgraded_sync_tables_without_losing_rows() {
+    fn v92_repairs_missing_group_overrides_and_canonicalizes_the_schema() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
             r#"
             PRAGMA foreign_keys = ON;
             CREATE TABLE settings (id INTEGER PRIMARY KEY, migration_version INTEGER NOT NULL);
-            INSERT INTO settings VALUES (1, 87);
+            INSERT INTO settings VALUES (1, 91);
             CREATE TABLE personas (id TEXT PRIMARY KEY);
             CREATE TABLE group_characters (id TEXT PRIMARY KEY);
             CREATE TABLE lorebooks (id TEXT PRIMARY KEY);
@@ -5853,8 +6257,7 @@ mod tests {
               memory_summary TEXT NOT NULL DEFAULT '', memory_summary_token_count INTEGER NOT NULL DEFAULT 0,
               memory_tool_events TEXT NOT NULL DEFAULT '[]', memory_status TEXT, memory_error TEXT,
               memory_progress_step INTEGER, speaker_selection_method TEXT NOT NULL DEFAULT 'llm',
-              config_overrides TEXT NOT NULL DEFAULT '{"version":1}', parent_session_id TEXT,
-              branched_from_message_id TEXT, root_session_id TEXT,
+              parent_session_id TEXT, branched_from_message_id TEXT, root_session_id TEXT,
               memory_type TEXT NOT NULL DEFAULT 'manual',
               FOREIGN KEY(persona_id) REFERENCES personas(id) ON DELETE SET NULL,
               FOREIGN KEY(group_character_id) REFERENCES group_characters(id) ON DELETE SET NULL
@@ -5898,19 +6301,20 @@ mod tests {
         .unwrap();
         crate::sync::v2::create_schema(&conn).unwrap();
 
-        migrate_v87_to_v88_conn(&conn).unwrap();
-        migrate_v87_to_v88_conn(&conn).unwrap();
+        run_preflight_migrations(&conn).unwrap();
+        run_preflight_migrations(&conn).unwrap();
 
         assert_eq!(table_column_names(&conn, "group_sessions").unwrap(), GROUP_SESSIONS_V88_COLUMNS);
         assert_eq!(table_column_names(&conn, "image_loras").unwrap(), IMAGE_LORAS_V88_COLUMNS);
         assert_eq!(table_column_names(&conn, "lorebook_entries").unwrap(), LOREBOOK_ENTRIES_V88_COLUMNS);
         assert_eq!(
             conn.query_row(
-                "SELECT name || ':' || memory_type FROM group_sessions WHERE id = 'session'",
+                "SELECT name || ':' || memory_type || ':' || config_overrides
+                 FROM group_sessions WHERE id = 'session'",
                 [],
                 |row| row.get::<_, String>(0),
             ).unwrap(),
-            "Preserved group:dynamic"
+            "Preserved group:dynamic:{\"version\":1}"
         );
         assert_eq!(
             conn.query_row(
@@ -5931,6 +6335,154 @@ mod tests {
         assert_eq!(
             conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| row.get::<_, i64>(0)).unwrap(),
             0
+        );
+    }
+
+    #[test]
+    fn v93_adds_group_model_and_prompt_overrides_without_losing_rows() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE settings (id INTEGER PRIMARY KEY, migration_version INTEGER NOT NULL);
+            INSERT INTO settings VALUES (1, 92);
+            CREATE TABLE personas (id TEXT PRIMARY KEY);
+            CREATE TABLE lorebooks (id TEXT PRIMARY KEY);
+            INSERT INTO personas VALUES ('persona');
+
+            CREATE TABLE group_characters (
+              id TEXT PRIMARY KEY, name TEXT NOT NULL, memory_type TEXT NOT NULL DEFAULT 'manual'
+            );
+            INSERT INTO group_characters VALUES ('group-config', 'Group', 'manual');
+
+            CREATE TABLE group_sessions (
+              id TEXT PRIMARY KEY, group_character_id TEXT, name TEXT NOT NULL,
+              character_ids TEXT NOT NULL DEFAULT '[]', muted_character_ids TEXT NOT NULL DEFAULT '[]',
+              persona_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+              archived INTEGER NOT NULL DEFAULT 0, chat_type TEXT NOT NULL DEFAULT 'conversation',
+              starting_scene TEXT, background_image_path TEXT, author_note TEXT,
+              lorebook_ids TEXT NOT NULL DEFAULT '[]', disable_character_lorebooks INTEGER NOT NULL DEFAULT 0,
+              memories TEXT NOT NULL DEFAULT '[]', memory_embeddings TEXT NOT NULL DEFAULT '[]',
+              memory_summary TEXT NOT NULL DEFAULT '', memory_summary_token_count INTEGER NOT NULL DEFAULT 0,
+              memory_tool_events TEXT NOT NULL DEFAULT '[]', memory_status TEXT, memory_error TEXT,
+              memory_progress_step INTEGER, speaker_selection_method TEXT NOT NULL DEFAULT 'llm',
+              memory_type TEXT NOT NULL DEFAULT 'manual',
+              config_overrides TEXT NOT NULL DEFAULT '{"version":1}',
+              parent_session_id TEXT, branched_from_message_id TEXT, root_session_id TEXT
+            );
+            INSERT INTO group_sessions (
+              id, group_character_id, name, persona_id, created_at, updated_at, root_session_id
+            ) VALUES ('session', 'group-config', 'Preserved group', 'persona', 10, 20, 'session');
+
+            CREATE TABLE image_loras (
+              path TEXT PRIMARY KEY, filename TEXT NOT NULL, bytes_on_disk INTEGER NOT NULL DEFAULT 0,
+              modified_at INTEGER NOT NULL DEFAULT 0, sha256 TEXT, keywords TEXT NOT NULL DEFAULT '[]',
+              keyword_source TEXT NOT NULL DEFAULT 'none', architecture TEXT,
+              architecture_source TEXT NOT NULL DEFAULT 'none', created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+            CREATE TABLE lorebook_entries (
+              id TEXT PRIMARY KEY, lorebook_id TEXT NOT NULL, title TEXT NOT NULL DEFAULT '',
+              enabled INTEGER NOT NULL DEFAULT 1, always_active INTEGER NOT NULL DEFAULT 0,
+              keywords TEXT NOT NULL DEFAULT '[]', case_sensitive INTEGER NOT NULL DEFAULT 0,
+              keyword_match_mode TEXT NOT NULL DEFAULT 'literal', content TEXT NOT NULL,
+              priority INTEGER NOT NULL DEFAULT 0, display_order INTEGER NOT NULL DEFAULT 0,
+              created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
+              FOREIGN KEY(lorebook_id) REFERENCES lorebooks(id) ON DELETE CASCADE
+            );
+            "#,
+        )
+        .unwrap();
+        crate::sync::v2::create_schema(&conn).unwrap();
+
+        run_preflight_migrations(&conn).unwrap();
+        run_preflight_migrations(&conn).unwrap();
+
+        assert_eq!(
+            table_column_names(&conn, "group_sessions").unwrap(),
+            GROUP_SESSIONS_V88_COLUMNS
+        );
+        for column in [
+            "character_model_overrides",
+            "group_chat_prompt_template_id",
+            "group_chat_roleplay_prompt_template_id",
+        ] {
+            assert!(
+                table_column_names(&conn, "group_characters")
+                    .unwrap()
+                    .iter()
+                    .any(|name| name == column),
+                "group_characters should gain {column}"
+            );
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT name || ':' || character_model_overrides FROM group_sessions WHERE id = 'session'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "Preserved group:{}"
+        );
+
+    }
+
+    #[test]
+    fn v94_restores_group_message_columns_dropped_by_a_failed_upgrade() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE settings (id INTEGER PRIMARY KEY, migration_version INTEGER NOT NULL);
+            INSERT INTO settings VALUES (1, 93);
+            CREATE TABLE group_messages (
+              id TEXT PRIMARY KEY, session_id TEXT NOT NULL, role TEXT NOT NULL,
+              content TEXT NOT NULL, speaker_character_id TEXT, turn_number INTEGER NOT NULL,
+              created_at INTEGER NOT NULL, prompt_tokens INTEGER, completion_tokens INTEGER,
+              total_tokens INTEGER, selected_variant_id TEXT, is_pinned INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO group_messages (id, session_id, role, content, turn_number, created_at)
+              VALUES ('message', 'session', 'assistant', 'Kept text', 1, 30);
+            CREATE TABLE group_message_variants (
+              id TEXT PRIMARY KEY, message_id TEXT NOT NULL, content TEXT NOT NULL,
+              speaker_character_id TEXT, created_at INTEGER NOT NULL
+            );
+            INSERT INTO group_message_variants VALUES ('variant', 'message', 'Kept variant', NULL, 31);
+            "#,
+        )
+        .unwrap();
+
+        run_preflight_migrations(&conn).unwrap();
+        run_preflight_migrations(&conn).unwrap();
+
+        for (table, columns) in [
+            ("group_messages", GROUP_MESSAGE_COLUMNS),
+            ("group_message_variants", GROUP_MESSAGE_VARIANT_COLUMNS),
+        ] {
+            let actual = table_column_names(&conn, table).unwrap();
+            for (column, _) in columns {
+                assert!(
+                    actual.iter().any(|name| name == column),
+                    "{table} should gain {column}"
+                );
+            }
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT content || ':' || COALESCE(gemini_content, 'null')
+                 FROM group_messages WHERE id = 'message'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "Kept text:null"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT content || ':' || attachments FROM group_message_variants WHERE id = 'variant'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "Kept variant:[]"
         );
     }
 

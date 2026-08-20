@@ -70,6 +70,8 @@ type ControllerReturn = {
   handleLlamaNPenRangeChange: (value: number | null) => void;
   handleLlamaXtcProbabilityChange: (value: number | null) => void;
   handleLlamaXtcThresholdChange: (value: number | null) => void;
+  handleLlamaAdaptiveTargetChange: (value: number | null) => void;
+  handleLlamaAdaptiveDecayChange: (value: number | null) => void;
   handleLlamaDryMultiplierChange: (value: number | null) => void;
   handleLlamaDryBaseChange: (value: number | null) => void;
   handleLlamaDryAllowedLengthChange: (value: number | null) => void;
@@ -84,6 +86,10 @@ type ControllerReturn = {
   handleLlamaMtpPlacementChange: (value: AdvancedModelSettings["llamaMtpPlacement"]) => void;
   handleLlamaMtpDraftTokensChange: (value: number | null) => void;
   handleLlamaMtpModelPathChange: (value: string | null) => void;
+  handleLlamaDflashEnabledChange: (value: boolean | null) => void;
+  handleLlamaDflashDraftTokensChange: (value: number | null) => void;
+  handleLlamaDflashMinProbabilityChange: (value: number | null) => void;
+  handleLlamaDflashModelPathChange: (value: string | null) => void;
   handleLlamaStreamingEnabledChange: (value: boolean | null) => void;
   handleOllamaNumCtxChange: (value: number | null) => void;
   handleOllamaNumPredictChange: (value: number | null) => void;
@@ -883,6 +889,32 @@ export function useModelEditorController(): ControllerReturn {
     [dispatch, state.modelAdvancedDraft],
   );
 
+  const handleLlamaAdaptiveTargetChange = useCallback(
+    (value: number | null) => {
+      dispatch({
+        type: "set_model_advanced_draft",
+        payload: {
+          ...state.modelAdvancedDraft,
+          llamaAdaptiveTarget: value,
+        },
+      });
+    },
+    [dispatch, state.modelAdvancedDraft],
+  );
+
+  const handleLlamaAdaptiveDecayChange = useCallback(
+    (value: number | null) => {
+      dispatch({
+        type: "set_model_advanced_draft",
+        payload: {
+          ...state.modelAdvancedDraft,
+          llamaAdaptiveDecay: value,
+        },
+      });
+    },
+    [dispatch, state.modelAdvancedDraft],
+  );
+
   const handleLlamaDryMultiplierChange = useCallback(
     (value: number | null) => {
       dispatch({
@@ -1033,6 +1065,7 @@ export function useModelEditorController(): ControllerReturn {
         payload: {
           ...state.modelAdvancedDraft,
           llamaMtpEnabled: value,
+          ...(value === true ? { llamaDflashEnabled: null } : {}),
         },
       });
     },
@@ -1072,6 +1105,59 @@ export function useModelEditorController(): ControllerReturn {
         payload: {
           ...state.modelAdvancedDraft,
           llamaMtpModelPath: value,
+        },
+      });
+    },
+    [dispatch, state.modelAdvancedDraft],
+  );
+
+  const handleLlamaDflashEnabledChange = useCallback(
+    (value: boolean | null) => {
+      dispatch({
+        type: "set_model_advanced_draft",
+        payload: {
+          ...state.modelAdvancedDraft,
+          llamaDflashEnabled: value,
+          ...(value === true ? { llamaMtpEnabled: null } : {}),
+        },
+      });
+    },
+    [dispatch, state.modelAdvancedDraft],
+  );
+
+  const handleLlamaDflashDraftTokensChange = useCallback(
+    (value: number | null) => {
+      dispatch({
+        type: "set_model_advanced_draft",
+        payload: {
+          ...state.modelAdvancedDraft,
+          llamaDflashDraftTokens: value,
+        },
+      });
+    },
+    [dispatch, state.modelAdvancedDraft],
+  );
+
+  const handleLlamaDflashMinProbabilityChange = useCallback(
+    (value: number | null) => {
+      dispatch({
+        type: "set_model_advanced_draft",
+        payload: {
+          ...state.modelAdvancedDraft,
+          llamaDflashMinProbability: value,
+        },
+      });
+    },
+    [dispatch, state.modelAdvancedDraft],
+  );
+
+  const handleLlamaDflashModelPathChange = useCallback(
+    (value: string | null) => {
+      dispatch({
+        type: "set_model_advanced_draft",
+        payload: {
+          ...state.modelAdvancedDraft,
+          llamaDflashModelPath: value,
         },
       });
     },
@@ -1742,6 +1828,8 @@ export function useModelEditorController(): ControllerReturn {
     handleLlamaNPenRangeChange,
     handleLlamaXtcProbabilityChange,
     handleLlamaXtcThresholdChange,
+    handleLlamaAdaptiveTargetChange,
+    handleLlamaAdaptiveDecayChange,
     handleLlamaDryMultiplierChange,
     handleLlamaDryBaseChange,
     handleLlamaDryAllowedLengthChange,
@@ -1756,6 +1844,10 @@ export function useModelEditorController(): ControllerReturn {
     handleLlamaMtpPlacementChange,
     handleLlamaMtpDraftTokensChange,
     handleLlamaMtpModelPathChange,
+    handleLlamaDflashEnabledChange,
+    handleLlamaDflashDraftTokensChange,
+    handleLlamaDflashMinProbabilityChange,
+    handleLlamaDflashModelPathChange,
     handleLlamaStreamingEnabledChange,
     handleOllamaNumCtxChange,
     handleOllamaNumPredictChange,

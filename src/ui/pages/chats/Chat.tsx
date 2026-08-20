@@ -57,6 +57,7 @@ import {
   createBranchedGroupSession,
   generateUserReply,
   getSession,
+  getSessionMessageCount,
   getSessionMeta,
   listBranchTree,
   listCharacters,
@@ -95,6 +96,7 @@ import { ChatAppearanceDrawer } from "./components/appearance/ChatAppearanceDraw
 import { CompanionTimeOverrideCard } from "./components/CompanionTimeOverrideCard";
 import { getChatColumnLayout } from "./utils/chatColumnLayout";
 import { getChatWidgetLayout, useViewportWidth } from "./utils/chatWidgetLayout";
+import { sessionEffectiveNowMs } from "./utils/companionTimeOverride";
 import { ChatWidgetArea } from "./components/ChatWidgetArea";
 import { WidgetDice } from "./components/widgets/WidgetDice";
 import {
@@ -632,6 +634,29 @@ export function ChatConversationPage() {
     applySceneImagePrompt,
   } = chatController;
 
+  const timestampReferenceMs = sessionEffectiveNowMs(session, Date.now());
+
+  const [totalMessageCount, setTotalMessageCount] = useState(0);
+  useEffect(() => {
+    if (!session?.id) {
+      setTotalMessageCount(0);
+      return;
+    }
+
+    let cancelled = false;
+    getSessionMessageCount(session.id)
+      .then((count) => {
+        if (!cancelled) setTotalMessageCount(count);
+      })
+      .catch((err) => {
+        console.warn("ChatConversationPage: failed to load message count", err);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session?.id, session?.updatedAt, messages.length]);
+
   useEffect(() => {
     let cancelled = false;
     if (!sessionId || messages.length === 0) {
@@ -714,7 +739,7 @@ export function ChatConversationPage() {
       persona: chatController.persona,
       session: chatController.session,
       hasBackground: !!backgroundImageData,
-      messageCount: messages.filter((m) => !m.id.startsWith("placeholder")).length,
+      messageCount: totalMessageCount,
       sceneName: selectedScene?.direction?.trim() || (selectedScene ? t("chats.message.sceneLabel") : null),
       memories: chatController.session?.memories ?? [],
       personas: widgetPersonas,
@@ -866,6 +891,7 @@ export function ChatConversationPage() {
     widgetModels,
     swapPlaces,
     messages,
+    totalMessageCount,
     characterId,
     navigate,
     reloadCharacter,
@@ -3233,6 +3259,7 @@ export function ChatConversationPage() {
                       message.role === "assistant" &&
                       index === visibleMessages.length - 1
                     }
+                    timestampReferenceMs={timestampReferenceMs}
                   />
                   </motion.div>
                   {childForks.has(message.id) ? (

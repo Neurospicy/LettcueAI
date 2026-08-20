@@ -35,6 +35,7 @@ export const LLAMA_SAMPLER_ORDER_STAGE_VALUES = [
   "typical",
   "xtc",
   "temp",
+  "adaptive_p",
 ] as const;
 
 export const LlamaSamplerProfileSchema = z.enum(LLAMA_SAMPLER_PROFILE_VALUES);
@@ -60,6 +61,7 @@ export const DEFAULT_LLAMA_SAMPLER_ORDER: readonly LlamaSamplerOrderStage[] = [
   "typical",
   "xtc",
   "temp",
+  "adaptive_p",
 ];
 
 export const LLAMA_SAMPLER_ORDER_PRESETS = {
@@ -457,6 +459,8 @@ export const FeatureGenerationSettingsSchema = z.object({
   llamaNPenRange: z.number().int().min(-1).max(262_144).nullable().optional(),
   llamaXtcProbability: z.number().min(0).max(1).nullable().optional(),
   llamaXtcThreshold: z.number().min(0).max(1).nullable().optional(),
+  llamaAdaptiveTarget: z.number().min(0).max(1).nullable().optional(),
+  llamaAdaptiveDecay: z.number().min(0).max(0.99).nullable().optional(),
   llamaDryMultiplier: z.number().min(0).max(10).nullable().optional(),
   llamaDryBase: z.number().min(0).max(10).nullable().optional(),
   llamaDryAllowedLength: z.number().int().min(0).max(128).nullable().optional(),
@@ -620,6 +624,10 @@ export const AdvancedModelSettingsSchema = z.object({
   llamaMtpPlacement: z.enum(["auto", "gpu", "cpu"]).nullable().optional(),
   llamaMtpDraftTokens: z.number().int().min(1).max(8).nullable().optional(),
   llamaMtpModelPath: z.string().trim().min(1).nullable().optional(),
+  llamaDflashEnabled: z.boolean().nullable().optional(),
+  llamaDflashDraftTokens: z.number().int().min(1).max(15).nullable().optional(),
+  llamaDflashMinProbability: z.number().min(0).max(1).nullable().optional(),
+  llamaDflashModelPath: z.string().trim().min(1).nullable().optional(),
   llamaStreamingEnabled: z.boolean().nullable().optional(),
   llamaSamplerProfile: LlamaSamplerProfileSchema.nullable().optional(),
   llamaSamplerOrder: z.array(LlamaSamplerOrderStageSchema).nullable().optional(),
@@ -634,6 +642,8 @@ export const AdvancedModelSettingsSchema = z.object({
   llamaDrySequenceBreakers: z.array(z.string()).nullable().optional(),
   llamaXtcProbability: z.number().min(0).max(1).nullable().optional(),
   llamaXtcThreshold: z.number().min(0).max(1).nullable().optional(),
+  llamaAdaptiveTarget: z.number().min(0).max(1).nullable().optional(),
+  llamaAdaptiveDecay: z.number().min(0).max(0.99).nullable().optional(),
   llamaLastRuntimeReport: LlamaLastRuntimeReportSchema.nullish().optional(),
   // Ollama specific settings
   ollamaNumCtx: z.number().int().min(0).max(262_144).nullable().optional(),
@@ -2226,6 +2236,8 @@ export const PROVIDER_PARAMETER_SUPPORT = {
       llamaDrySequenceBreakers: true,
       llamaXtcProbability: true,
       llamaXtcThreshold: true,
+      llamaAdaptiveTarget: true,
+      llamaAdaptiveDecay: true,
       reasoningEnabled: true,
       reasoningEffort: true,
       reasoningBudgetTokens: true,
@@ -2595,6 +2607,8 @@ export const MessageSchema = z.object({
   reasoning: z.string().nullish(),
   /** Model actually used for this message generation */
   modelId: z.uuid().nullish(),
+  /** Exact Gemini model content retained for thought-signature replay */
+  geminiContent: z.unknown().nullish(),
 });
 export type StoredMessage = z.infer<typeof MessageSchema>;
 
@@ -2751,6 +2765,12 @@ export const GroupSessionSchema = z.object({
   memoryStatus: z.string().nullish().optional().default("idle"),
   memoryError: z.string().nullish().optional(),
   memoryProgressStep: z.number().int().nullish().optional(),
+  /** Per-character model overrides keyed by character id */
+  characterModelOverrides: z.record(z.string(), z.string()).default({}),
+  /** Group system prompt override used for conversation chats */
+  groupChatPromptTemplateId: z.string().nullish().optional(),
+  /** Group system prompt override used for roleplay chats */
+  groupChatRoleplayPromptTemplateId: z.string().nullish().optional(),
   configOverrides: z.record(z.string(), z.unknown()).default({ version: 1 }),
 });
 export type GroupSession = z.infer<typeof GroupSessionSchema>;
@@ -2766,6 +2786,9 @@ export const GROUP_SESSION_OVERRIDE_KEYS = [
   "disableCharacterLorebooks",
   "speakerSelectionMethod",
   "memoryType",
+  "characterModelOverrides",
+  "groupChatPromptTemplateId",
+  "groupChatRoleplayPromptTemplateId",
 ] as const;
 export type GroupSessionOverrideKey = (typeof GROUP_SESSION_OVERRIDE_KEYS)[number];
 
@@ -2793,6 +2816,12 @@ export const GroupSchema = z.object({
   speakerSelectionMethod: z.enum(["llm", "heuristic", "round_robin", "director", "director_action"]).default("llm"),
   memoryType: z.enum(["manual", "dynamic"]).default("manual"),
   chatAppearance: z.lazy(() => ChatAppearanceOverrideSchema).nullish(),
+  /** Per-character model overrides keyed by character id */
+  characterModelOverrides: z.record(z.string(), z.string()).default({}),
+  /** Group system prompt override used for conversation chats */
+  groupChatPromptTemplateId: z.string().nullish().optional(),
+  /** Group system prompt override used for roleplay chats */
+  groupChatRoleplayPromptTemplateId: z.string().nullish().optional(),
 });
 export type Group = z.infer<typeof GroupSchema>;
 
@@ -3432,7 +3461,7 @@ export function createDefaultSettings(): Settings {
       avatarGenerationEnabled: true,
       creationHelperEnabled: false,
       helpMeReplyEnabled: true,
-      sceneGenerationEnabled: true,
+      sceneGenerationEnabled: false,
       sceneGenerationMode: "auto",
       appUpdateChecksEnabled: true,
       developerModeEnabled: false,

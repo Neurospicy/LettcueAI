@@ -715,6 +715,8 @@ pub(crate) async fn llamacpp_context_info(
     llama_mtp_enabled: Option<bool>,
     llama_mtp_placement: Option<String>,
     llama_mtp_model_path: Option<String>,
+    llama_dflash_enabled: Option<bool>,
+    llama_dflash_model_path: Option<String>,
 ) -> Result<LlamaCppContextInfo, String> {
     let _ = app;
     let _ = llama_main_gpu;
@@ -762,17 +764,26 @@ pub(crate) async fn llamacpp_context_info(
         .map(str::trim)
         .unwrap_or("auto")
         .to_ascii_lowercase();
-    let mtp_requested_reserve_bytes =
-        if supports_gpu_offload && llama_mtp_enabled == Some(true) && mtp_placement != "cpu" {
-            llama_mtp_model_path
-                .as_deref()
-                .filter(|path| !path.trim().is_empty())
-                .map(|path| estimate_mtp_gpu_reserve_bytes(path, 16_384))
-                .transpose()?
-                .unwrap_or(0)
-        } else {
-            0
-        };
+    let bundled_mtp_draft =
+        llama_mtp_enabled == Some(true) && super::mtp::model_has_mtp(&model_path);
+    let drafter_path = if llama_dflash_enabled == Some(true) {
+        llama_dflash_model_path
+            .as_deref()
+            .or(llama_mtp_model_path.as_deref())
+    } else if llama_mtp_enabled == Some(true) {
+        llama_mtp_model_path.as_deref()
+    } else {
+        None
+    };
+    let mtp_requested_reserve_bytes = if supports_gpu_offload && mtp_placement != "cpu" {
+        drafter_path
+            .filter(|path| !path.trim().is_empty())
+            .map(|path| estimate_mtp_gpu_reserve_bytes(path, 16_384, 512, llama_kv_type.as_deref()))
+            .transpose()?
+            .unwrap_or(0)
+    } else {
+        0
+    };
     let mtp_vram_reserve_bytes = if mtp_placement == "gpu"
         || (mtp_placement == "auto"
             && available_vram_bytes
@@ -835,6 +846,7 @@ pub(crate) async fn llamacpp_context_info(
             llama_kv_type.as_deref(),
             flash_attention_policy,
             sidecar_vram_reserve_bytes,
+            bundled_mtp_draft,
         )?
         .estimated_gpu_layers
     };
@@ -848,6 +860,9 @@ pub(crate) async fn llamacpp_context_info(
     } else {
         compute_recommended_context_for_gpu_layers(
             &metadata,
+            super::offload::load_offload_costs(&model_path).as_ref(),
+            super::offload::load_kv_geometry(&model_path).as_ref(),
+            512,
             available_memory_bytes,
             available_vram_bytes,
             resolved_gpu_layers,
@@ -892,6 +907,7 @@ pub(crate) async fn llamacpp_context_info(
                 0,
                 Some(&manual_aligned),
                 None,
+                None,
             )
         } else {
             let flash_attention_policy = if using_rocm_backend() {
@@ -909,6 +925,7 @@ pub(crate) async fn llamacpp_context_info(
                 llama_kv_type.as_deref(),
                 flash_attention_policy,
                 sidecar_vram_reserve_bytes,
+                bundled_mtp_draft,
             )?;
             let kv_bytes_per_layer = plan.kv_bytes_per_layer;
             plan_multi_gpu_distribution(
@@ -920,6 +937,7 @@ pub(crate) async fn llamacpp_context_info(
                 plan.estimated_gpu_layers,
                 None,
                 llama_priority_vram_limit_bytes,
+                Some(&plan.offload_unit_costs),
             )
         };
         let vram = per_dev
